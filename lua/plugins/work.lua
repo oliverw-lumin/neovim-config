@@ -1,0 +1,35 @@
+-- Work-machine extras (Wyatt / this laptop). Safe to keep local or push upstream.
+return {
+  {
+    'WhoIsSethDaniel/mason-tool-installer.nvim',
+    dependencies = { 'mason-org/mason.nvim' },
+    opts = {
+      ensure_installed = {
+        'lua-language-server',
+        'typescript-language-server',
+        'json-lsp',
+        'yaml-language-server',
+        'html-lsp',
+        'css-lsp',
+        'bash-language-server',
+        'marksman',
+        'clangd',
+        'pyright',
+        'rust-analyzer',
+        'gopls',
+        'tailwindcss-language-server',
+        'biome',
+        'eslint-lsp',
+        'prettier',
+        'stylua',
+        'ruff',
+        'shellcheck',
+        'goimports',
+        'gofumpt',
+        'staticcheck',
+        'selene',
+        'yamllint',
+      },
+    },
+  },
+}

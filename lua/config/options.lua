@@ -12,10 +12,13 @@ end)
 
 vim.o.breakindent = true
 vim.o.foldlevel = 0
+-- Default indent is 4 spaces. Per-buffer values come from .editorconfig
+-- (built in) and guess-indent when the file/project already uses 2 spaces.
 vim.o.tabstop = 4
 vim.o.shiftwidth = 4
 vim.o.expandtab = true
-vim.o.softtabstop = 4
+vim.o.softtabstop = -1
+vim.g.editorconfig = true
 vim.o.undofile = true
 
 if vim.env.SUDO_USER then

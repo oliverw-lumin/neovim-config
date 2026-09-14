@@ -30,6 +30,7 @@ return {
           map('gra', vim.lsp.buf.code_action, 'Code action', { 'n', 'x' })
           map('grr', vim.lsp.buf.references, 'Goto references')
           map('gri', require('telescope.builtin').lsp_implementations, 'Goto implementation')
+          map('gd', require('telescope.builtin').lsp_definitions, 'Goto definition')
           map('grd', require('telescope.builtin').lsp_definitions, 'Goto definition')
           map('grD', vim.lsp.buf.declaration, 'Goto declaration')
           map('gO', require('telescope.builtin').lsp_document_symbols, 'Document symbols')

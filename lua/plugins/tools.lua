@@ -153,10 +153,10 @@ return {
 
       lint.linters_by_ft = {
         python = { 'ruff' },
-        javascript = { 'eslint' },
-        typescript = { 'eslint' },
-        javascriptreact = { 'eslint' },
-        typescriptreact = { 'eslint' },
+        javascript = {},
+        typescript = {},
+        javascriptreact = {},
+        typescriptreact = {},
         lua = { 'selene' },
         c = { 'cppcheck' },
         cpp = { 'cppcheck' },

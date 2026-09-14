@@ -29,6 +29,8 @@ end
 require 'config.options'
 require 'config.keymaps'
 require 'config.autocmds'
+require 'config.work'
+require 'config.review'
 
 local lazypath = vim.fn.stdpath 'data' .. '/lazy/lazy.nvim'
 if not (vim.uv or vim.loop).fs_stat(lazypath) then
@@ -45,6 +47,7 @@ require('lazy').setup({
   require 'plugins.ui',
   require 'plugins.tools',
   require 'plugins.editor',
+  require 'plugins.work',
 }, {
   ui = {
     icons = vim.g.have_nerd_font and {} or {
