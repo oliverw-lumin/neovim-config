@@ -52,6 +52,7 @@ return {
         'c',
         'cpp',
         'css',
+        'dart',
         'diff',
         'go',
         'html',
