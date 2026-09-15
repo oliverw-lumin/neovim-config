@@ -248,6 +248,30 @@ return {
       { '<leader>gd', '<Cmd>DiffviewOpen<CR>', desc = 'Diff view' },
       { '<leader>gh', '<Cmd>DiffviewFileHistory<CR>', desc = 'File history' },
     },
+    opts = function()
+      local actions = require 'diffview.actions'
+      return {
+        file_panel = {
+          win_config = {
+            win_opts = {
+              number = true,
+              relativenumber = true,
+            },
+          },
+        },
+        keymaps = {
+          -- L is <S-l>, which we use to move focus to the right window.
+          file_panel = {
+            { 'n', 'L', false },
+            { 'n', 'gL', actions.open_commit_log, { desc = 'Open the commit log panel' } },
+          },
+          file_history_panel = {
+            { 'n', 'L', false },
+            { 'n', 'gL', actions.open_commit_log, { desc = 'Show commit details' } },
+          },
+        },
+      }
+    end,
   },
 
   {

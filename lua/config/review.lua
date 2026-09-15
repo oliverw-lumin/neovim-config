@@ -277,14 +277,33 @@ local function save_queue(number, queue)
   vim.fn.writefile({ vim.json.encode(queue) }, queue_path(number))
 end
 
---- Notes file contents with the seeded <!-- --> header stripped.
+--- Write the open gn buffer if it is this PR's notes file.
+local function flush_notes(number)
+  local path = vim.fn.fnamemodify(notes_path(number), ':p')
+  local buf = vim.fn.bufnr(path)
+  if buf ~= -1 and vim.api.nvim_buf_is_valid(buf) and vim.bo[buf].modified then
+    pcall(vim.api.nvim_buf_call, buf, function()
+      vim.cmd 'silent write'
+    end)
+  end
+end
+
+--- Notes contents with the seeded <!-- --> header stripped. Prefers the live
+--- gn buffer so unsaved drafts still go out.
 local function notes_body(number)
-  local path = notes_path(number)
-  if vim.fn.filereadable(path) == 0 then
+  flush_notes(number)
+  local path = vim.fn.fnamemodify(notes_path(number), ':p')
+  local buf = vim.fn.bufnr(path)
+  local lines
+  if buf ~= -1 and vim.api.nvim_buf_is_valid(buf) then
+    lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  elseif vim.fn.filereadable(path) == 1 then
+    lines = vim.fn.readfile(path)
+  else
     return ''
   end
   local kept = {}
-  for _, line in ipairs(vim.fn.readfile(path)) do
+  for _, line in ipairs(lines) do
     if not line:match '^%s*<!%-%-' then
       table.insert(kept, line)
     end
@@ -1139,11 +1158,9 @@ local function api_post(endpoint, payload, on_done)
 end
 
 --- Submit the summary and every queued line comment as one review.
-function M.submit(kind)
-  local pr = require_current()
-  if not pr then
-    return
-  end
+--- opts.skip_confirm / opts.on_done are for close-PR, which already confirmed.
+local function submit_review(pr, kind, opts)
+  opts = opts or {}
   local ev = EVENTS[kind]
   if not ev then
     notify('unknown review type: ' .. tostring(kind), vim.log.levels.ERROR)
@@ -1180,19 +1197,24 @@ function M.submit(kind)
     payload.comments = queue
   end
 
-  local prompt
-  if #queue == 0 and body == '' then
-    prompt = ('%s #%d with no comments?'):format(ev.label, pr.number)
-  else
-    prompt = ('%s on #%d with %d line comment(s)?'):format(ev.label, pr.number, #queue)
-  end
-  if vim.fn.confirm(prompt, '&Yes\n&No', 2) ~= 1 then
-    return
+  if not opts.skip_confirm then
+    local prompt
+    if #queue == 0 and body == '' then
+      prompt = ('%s #%d with no comments?'):format(ev.label, pr.number)
+    else
+      prompt = ('%s on #%d with %d line comment(s)?'):format(ev.label, pr.number, #queue)
+    end
+    if vim.fn.confirm(prompt, '&Yes\n&No', 2) ~= 1 then
+      return
+    end
   end
 
   local function finished()
     save_queue(pr.number, {})
     notify(('#%d submitted (%s, %d line comments)'):format(pr.number, ev.label, #queue))
+    if opts.on_done then
+      opts.on_done()
+    end
   end
 
   local function failed(res, what)
@@ -1242,6 +1264,75 @@ function M.submit(kind)
       finished()
     end)
   end)
+end
+
+function M.submit(kind)
+  local pr = require_current()
+  if not pr then
+    return
+  end
+  submit_review(pr, kind)
+end
+
+--- Close the GitHub PR. Posts the gn notes and any queued line comments first.
+function M.close_pr()
+  local pr = require_current()
+  if not pr then
+    return
+  end
+  if not have_gh() then
+    return
+  end
+
+  vim.cmd 'silent! wall'
+  local body = notes_body(pr.number)
+  local queue = load_queue(pr.number)
+
+  local prompt
+  if body ~= '' or #queue > 0 then
+    prompt = ('Close #%d on GitHub, sending gn notes and %d line comment(s)?'):format(
+      pr.number,
+      #queue
+    )
+  else
+    prompt = ('Close #%d on GitHub with no comment?'):format(pr.number)
+  end
+  if vim.fn.confirm(prompt, '&Yes\n&No', 2) ~= 1 then
+    return
+  end
+
+  local function tear_down()
+    close_previous(pr.number)
+    M.current = nil
+  end
+
+  local function do_close()
+    local cmd = { 'gh', 'pr', 'close', tostring(pr.number) }
+    -- Line comments already went out as a review (with the notes as its body).
+    -- Notes-only uses --comment so the close reason is on the issue thread.
+    if body ~= '' and #queue == 0 then
+      table.insert(cmd, '--comment')
+      table.insert(cmd, body)
+    end
+    run(cmd, function(res)
+      if res.code ~= 0 then
+        local err = res.stderr
+        if err == nil or err == '' then
+          err = res.stdout
+        end
+        notify('close failed: ' .. (err or ''), vim.log.levels.ERROR)
+        return
+      end
+      notify(('#%d closed'):format(pr.number))
+      tear_down()
+    end)
+  end
+
+  if #queue > 0 then
+    submit_review(pr, 'comment', { skip_confirm = true, on_done = do_close })
+    return
+  end
+  do_close()
 end
 
 ---------------------------------------------------------------------------
@@ -1322,6 +1413,7 @@ end, 'Review: submit comment')
 map('<leader>gX', function()
   M.submit 'request'
 end, 'Review: submit request-changes')
+map('<leader>gZ', M.close_pr, 'Review: close PR (send gn notes)')
 
 map('<leader>gy', M.permalink, 'Review: yank GitHub permalink', { 'n', 'x' })
 
@@ -1344,5 +1436,9 @@ end, { nargs = '?', desc = 'Review a PR: pick from your queue, or pass a number/
 vim.api.nvim_create_user_command('PRUncomment', function(opts)
   M.unqueue(opts.args)
 end, { nargs = 1, desc = 'Drop a queued review comment by index' })
+
+vim.api.nvim_create_user_command('PRClose', function()
+  M.close_pr()
+end, { desc = 'Close the current PR, sending gn notes and queued comments' })
 
 return M

@@ -154,14 +154,29 @@ return {
         cmd = { 'clangd-22', '--clang-tidy=false', '--pch-storage=disk', '--query-driver=/usr/bin/c++,/usr/bin/g++*,/usr/bin/aarch64-linux-gnu-g++*' },
       })
 
-      -- Dart ships its language server inside the SDK, so there is nothing for
-      -- Mason to install and nothing to enable when the SDK is absent -- doing
-      -- so makes every .dart buffer error about a missing cmd instead.
-      local have_dart = vim.fn.executable 'dart' == 1
+      -- Dart ships its language server inside the SDK. Prefer Flutter's dart
+      -- so package:flutter and path packages resolve; Homebrew's standalone
+      -- dart can sit on PATH and still be the wrong binary.
+      local function dart_for_lsp()
+        local flutter = vim.fn.exepath 'flutter'
+        if flutter ~= '' then
+          local sibling = vim.fs.joinpath(vim.fs.dirname(flutter), 'dart')
+          if vim.fn.executable(sibling) == 1 then
+            return sibling
+          end
+        end
+        local dart = vim.fn.exepath 'dart'
+        if dart ~= '' then
+          return dart
+        end
+      end
 
-      if have_dart then
+      local dart_bin = dart_for_lsp()
+
+      if dart_bin then
         vim.lsp.config.dartls = vim.tbl_deep_extend('force', vim.lsp.config.dartls or {}, {
           capabilities = capabilities,
+          cmd = { dart_bin, 'language-server', '--protocol=lsp' },
         })
       end
 
@@ -179,13 +194,13 @@ return {
         'clangd',
       }
 
-      if have_dart then
+      if dart_bin then
         table.insert(servers, 'dartls')
       end
 
       vim.lsp.enable(servers)
 
-      if not have_dart then
+      if not dart_bin then
         -- Say so the first time a Dart file is opened, rather than silently
         -- having no LSP and leaving you to wonder.
         vim.api.nvim_create_autocmd('FileType', {
@@ -193,7 +208,7 @@ return {
           once = true,
           callback = function()
             vim.notify(
-              'dartls not enabled: `dart` is not on PATH (install the Dart/Flutter SDK)',
+              'dartls not enabled: install the Flutter SDK (wyatt_mobile/scripts/setup.sh)',
               vim.log.levels.WARN
             )
           end,
