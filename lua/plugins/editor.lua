@@ -32,14 +32,56 @@ return {
   },
 
   {
-    'nvim-treesitter/nvim-treesitter',
-    build = ':TSUpdate',
+    'NMAC427/guess-indent.nvim',
+    event = { 'BufReadPre', 'BufNewFile' },
     opts = {
-      ensure_installed = { 'bash', 'c', 'diff', 'html', 'lua', 'luadoc', 'markdown', 'markdown_inline', 'query', 'vim', 'vimdoc', 'cpp', 'python', 'javascript', 'typescript', 'css', 'json', 'yaml', 'go', 'rust' },
-      auto_install = true,
-      highlight = { enable = true, additional_vim_regex_highlighting = { 'ruby' } },
-      indent = { enable = true, disable = { 'ruby' } },
+      auto_cmd = true,
+      override_editorconfig = false,
     },
+  },
+
+  {
+    'nvim-treesitter/nvim-treesitter',
+    lazy = false,
+    build = ':TSUpdate',
+    config = function()
+      -- nvim-treesitter main (required on Neovim 0.12+) dropped the old
+      -- configs.setup / ensure_installed API.
+      local langs = {
+        'bash',
+        'c',
+        'cpp',
+        'css',
+        'dart',
+        'diff',
+        'go',
+        'html',
+        'javascript',
+        'json',
+        'lua',
+        'luadoc',
+        'markdown',
+        'markdown_inline',
+        'python',
+        'query',
+        'rust',
+        'tsx',
+        'typescript',
+        'vim',
+        'vimdoc',
+        'yaml',
+      }
+      require('nvim-treesitter').install(langs)
+      vim.api.nvim_create_autocmd('FileType', {
+        group = vim.api.nvim_create_augroup('treesitter-start', { clear = true }),
+        callback = function(event)
+          local ok = pcall(vim.treesitter.start, event.buf)
+          if ok and vim.bo[event.buf].filetype ~= 'ruby' then
+            vim.bo[event.buf].indentexpr = "v:lua.require'nvim-treesitter'.indentexpr()"
+          end
+        end,
+      })
+    end,
   },
 
   {

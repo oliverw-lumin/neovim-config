@@ -30,6 +30,7 @@ return {
           map('gra', vim.lsp.buf.code_action, 'Code action', { 'n', 'x' })
           map('grr', vim.lsp.buf.references, 'Goto references')
           map('gri', require('telescope.builtin').lsp_implementations, 'Goto implementation')
+          map('gd', require('telescope.builtin').lsp_definitions, 'Goto definition')
           map('grd', require('telescope.builtin').lsp_definitions, 'Goto definition')
           map('grD', vim.lsp.buf.declaration, 'Goto declaration')
           map('gO', require('telescope.builtin').lsp_document_symbols, 'Document symbols')
@@ -155,7 +156,18 @@ return {
         cmd = { 'clangd-22', '--clang-tidy=false', '--pch-storage=disk', '--query-driver=/usr/bin/c++,/usr/bin/g++*,/usr/bin/aarch64-linux-gnu-g++*' },
       })
 
-      vim.lsp.enable({
+      -- Dart ships its language server inside the SDK, so there is nothing for
+      -- Mason to install and nothing to enable when the SDK is absent -- doing
+      -- so makes every .dart buffer error about a missing cmd instead.
+      local have_dart = vim.fn.executable 'dart' == 1
+
+      if have_dart then
+        vim.lsp.config.dartls = vim.tbl_deep_extend('force', vim.lsp.config.dartls or {}, {
+          capabilities = capabilities,
+        })
+      end
+
+      local servers = {
         'lua_ls',
         'rust_analyzer',
         'pyright',
@@ -167,7 +179,28 @@ return {
         'bashls',
         'marksman',
         'clangd',
-      })
+      }
+
+      if have_dart then
+        table.insert(servers, 'dartls')
+      end
+
+      vim.lsp.enable(servers)
+
+      if not have_dart then
+        -- Say so the first time a Dart file is opened, rather than silently
+        -- having no LSP and leaving you to wonder.
+        vim.api.nvim_create_autocmd('FileType', {
+          pattern = 'dart',
+          once = true,
+          callback = function()
+            vim.notify(
+              'dartls not enabled: `dart` is not on PATH (install the Dart/Flutter SDK)',
+              vim.log.levels.WARN
+            )
+          end,
+        })
+      end
 
 
     end,
@@ -203,6 +236,7 @@ return {
         html = { 'prettier' },
         css = { 'prettier' },
         rust = { 'rustfmt' },
+        dart = { 'dart_format' },
       },
     },
   },
