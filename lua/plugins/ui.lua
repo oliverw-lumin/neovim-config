@@ -251,6 +251,11 @@ return {
     opts = function()
       local actions = require 'diffview.actions'
       return {
+        hooks = {
+          diff_buf_read = function(bufnr)
+            require('config.review').attach_diff_lsp(bufnr)
+          end,
+        },
         file_panel = {
           win_config = {
             win_opts = {

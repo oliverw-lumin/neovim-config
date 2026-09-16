@@ -3,6 +3,13 @@
 -- Pick a PR that is waiting on your review, diff it against the branch it
 -- actually targets (not your local HEAD), leave line comments, submit -- all
 -- in nvim. Requires the `gh` CLI, plus telescope + diffview.
+--
+-- Picker: <C-a> toggles the production-base filter, <C-o> switches between
+-- your review-requested queue and every open PR still awaiting a review.
+--
+-- Diffview commit blobs are buftype=nowrite + a diffview:// name, so Neovim
+-- will not auto-attach language servers. We attach them ourselves and present
+-- the blob as the real project file so gd/grd resolve against the PR text.
 
 local M = {}
 
@@ -11,7 +18,10 @@ M.config = {
   -- Only show PRs whose base is this branch. <C-a> in the picker toggles to
   -- every base. Set to nil to show everything by default.
   base_filter = 'production',
+  -- <C-o> in the picker switches between this (your queue) and all_search.
   search = 'review-requested:@me',
+  -- Open PRs that still need a review (anyone), not only ones assigned to you.
+  all_search = 'review:required -is:draft',
   limit = 100,
   notes_dir = vim.fn.stdpath 'state' .. '/pr-review',
   -- Comment authors to hide in the PR summary. Lua patterns matched
@@ -217,6 +227,196 @@ local function repo_relative(path)
     return path:sub(#root + 2)
   end
   return nil
+end
+
+-- Language servers key documents by file:// URI and skip nowrite buffers.
+-- Point those APIs at the repo path so dartls/gopls/ts_ls treat a review
+-- blob as that file, with the PR's contents.
+local function patch_review_uris()
+  if vim.g.pr_review_uri_patched then
+    return
+  end
+  vim.g.pr_review_uri_patched = true
+  local orig = vim.uri_from_bufnr
+  vim.uri_from_bufnr = function(bufnr)
+    bufnr = vim._resolve_bufnr(bufnr)
+    if vim.api.nvim_buf_is_valid(bufnr) then
+      local path = vim.b[bufnr].review_lsp_path
+      if type(path) == 'string' and path ~= '' then
+        return vim.uri_from_fname(path)
+      end
+    end
+    return orig(bufnr)
+  end
+end
+
+local function enabled_lsp_names()
+  local names = {}
+  local enabled = rawget(vim.lsp, '_enabled_configs')
+  if type(enabled) == 'table' then
+    for name in pairs(enabled) do
+      names[#names + 1] = name
+    end
+  end
+  if #names > 0 then
+    return names
+  end
+  return {
+    'dartls',
+    'gopls',
+    'ts_ls',
+    'lua_ls',
+    'rust_analyzer',
+    'pyright',
+    'clangd',
+    'jsonls',
+    'yamlls',
+    'html',
+    'cssls',
+    'bashls',
+    'marksman',
+    'tailwindcss',
+    'biome',
+    'eslint',
+  }
+end
+
+local function jump_location(client, loc)
+  local uri = loc.uri or loc.targetUri
+  local range = loc.range or loc.targetSelectionRange
+  if not uri or not range then
+    return
+  end
+  local fname = vim.uri_to_fname(uri)
+  local here = vim.api.nvim_get_current_buf()
+  if vim.b[here].review_lsp_path == fname then
+    pcall(vim.api.nvim_win_set_cursor, 0, { range.start.line + 1, range.start.character })
+    vim.cmd 'normal! zz'
+    return
+  end
+  vim.cmd('tabedit ' .. vim.fn.fnameescape(fname))
+  pcall(vim.api.nvim_win_set_cursor, 0, { range.start.line + 1, range.start.character })
+  vim.cmd 'normal! zz'
+end
+
+local function review_lsp_request(method, empty_msg)
+  local bufnr = vim.api.nvim_get_current_buf()
+  local clients = vim.lsp.get_clients { bufnr = bufnr, method = method }
+  if #clients == 0 then
+    notify('no language server on this diff buffer', vim.log.levels.WARN)
+    return
+  end
+  local client = clients[1]
+  local params = vim.lsp.util.make_position_params(0, client.offset_encoding)
+  client:request(method, params, function(err, result)
+    if err then
+      notify(err.message or tostring(err), vim.log.levels.WARN)
+      return
+    end
+    if not result or vim.tbl_isempty(result) then
+      notify(empty_msg, vim.log.levels.INFO)
+      return
+    end
+    local loc = result
+    if type(result) == 'table' and result[1] then
+      loc = result[1]
+    end
+    jump_location(client, loc)
+  end, bufnr)
+end
+
+local function map_review_lsp(bufnr)
+  local function bufmap(lhs, method, desc, empty)
+    vim.keymap.set('n', lhs, function()
+      review_lsp_request(method, empty)
+    end, { buffer = bufnr, desc = 'LSP: ' .. desc })
+  end
+  bufmap('gd', 'textDocument/definition', 'Goto definition', 'no definition')
+  bufmap('grd', 'textDocument/definition', 'Goto definition', 'no definition')
+  bufmap('gri', 'textDocument/implementation', 'Goto implementation', 'no implementation')
+  bufmap('grt', 'textDocument/typeDefinition', 'Goto type', 'no type definition')
+  bufmap('grD', 'textDocument/declaration', 'Goto declaration', 'no declaration')
+end
+
+function M.attach_diff_lsp(bufnr)
+  bufnr = bufnr or vim.api.nvim_get_current_buf()
+  if not vim.api.nvim_buf_is_valid(bufnr) then
+    return
+  end
+  -- Working-tree sides are real files; the normal LSP autocmd already runs.
+  if vim.bo[bufnr].buftype == '' then
+    return
+  end
+  local name = vim.api.nvim_buf_get_name(bufnr)
+  if name == '' or name:find('diffview://null', 1, true) then
+    return
+  end
+  local ft = vim.bo[bufnr].filetype
+  if ft == '' or ft == 'DiffviewFileHistory' or ft == 'DiffviewFiles' then
+    return
+  end
+
+  local rel = repo_relative(name)
+  local root = git_root()
+  if not rel or not root then
+    return
+  end
+  local abs = root .. '/' .. rel
+  vim.b[bufnr].review_lsp_path = abs
+  patch_review_uris()
+
+  local attached = false
+  for _, client in ipairs(vim.lsp.get_clients()) do
+    local fts = client.config and client.config.filetypes
+    local client_root = client.root_dir or (client.config and client.config.root_dir)
+    if
+      type(fts) == 'table'
+      and vim.tbl_contains(fts, ft)
+      and type(client_root) == 'string'
+      and vim.startswith(abs, client_root)
+    then
+      if vim.lsp.buf_attach_client(bufnr, client.id) then
+        attached = true
+      end
+    end
+  end
+
+  for _, name_ in ipairs(enabled_lsp_names()) do
+    if vim.lsp.is_enabled(name_) then
+      local config = vim.lsp.config[name_]
+      if
+        type(config) == 'table'
+        and type(config.filetypes) == 'table'
+        and vim.tbl_contains(config.filetypes, ft)
+      then
+        config = vim.deepcopy(config)
+        local markers = config.root_markers
+        if type(config.root_dir) == 'function' or not config.root_dir then
+          config.root_dir = (markers and vim.fs.root(abs, markers)) or vim.fs.root(abs, { '.git' })
+        end
+        if config.root_dir then
+          local id = vim.lsp.start(config, {
+            bufnr = bufnr,
+            reuse_client = function(client, cfg)
+              if client.name ~= cfg.name or client:is_stopped() then
+                return false
+              end
+              local client_root = client.root_dir or client.config.root_dir
+              return type(client_root) == 'string' and vim.startswith(abs, client_root)
+            end,
+          })
+          if id then
+            attached = true
+          end
+        end
+      end
+    end
+  end
+
+  if attached then
+    vim.diagnostic.enable(false, { bufnr = bufnr })
+    map_review_lsp(bufnr)
+  end
 end
 
 local function in_visual()
@@ -447,7 +647,8 @@ end
 -- Picker
 ---------------------------------------------------------------------------
 
-function M.show_picker(prs, base_filter)
+function M.show_picker(prs, base_filter, scope)
+  scope = scope or 'mine'
   local pickers = require 'telescope.pickers'
   local finders = require 'telescope.finders'
   local conf = require('telescope.config').values
@@ -481,10 +682,14 @@ function M.show_picker(prs, base_filter)
     items = { { width = 6 }, { width = 14 }, { width = 16 }, { remaining = true } },
   }
 
+  local who = scope == 'all' and 'Awaiting review' or 'Your review queue'
+  local hint = scope == 'all' and 'C-o yours' or 'C-o all'
+  local title = base_filter and ('%s -> %s  (%s)'):format(who, base_filter, hint)
+    or ('%s (all bases)  (%s)'):format(who, hint)
+
   pickers
     .new({}, {
-      prompt_title = base_filter and ('PRs for review -> ' .. base_filter)
-        or 'PRs for review (all bases)',
+      prompt_title = title,
       finder = finders.new_table {
         results = shown,
         entry_maker = function(pr)
@@ -559,30 +764,52 @@ function M.show_picker(prs, base_filter)
           end
         end)
         -- Toggle between "only PRs targeting the production branch" and everything.
-        local toggle = function()
+        local toggle_base = function()
           actions.close(prompt_bufnr)
           local next_filter = nil
           if not base_filter then
             next_filter = M.config.base_filter
           end
-          M.show_picker(prs, next_filter)
+          M.show_picker(prs, next_filter, scope)
         end
-        map('i', '<C-a>', toggle)
-        map('n', '<C-a>', toggle)
+        -- Re-fetch: your review-requested queue vs every PR still awaiting review.
+        local toggle_scope = function()
+          actions.close(prompt_bufnr)
+          M.pick {
+            scope = scope == 'all' and 'mine' or 'all',
+            base_filter = base_filter,
+            all_bases = base_filter == nil,
+          }
+        end
+        map('i', '<C-a>', toggle_base)
+        map('n', '<C-a>', toggle_base)
+        map('i', '<C-o>', toggle_scope)
+        map('n', '<C-o>', toggle_scope)
         return true
       end,
     })
     :find()
 end
 
-function M.pick()
+function M.pick(opts)
   if not have_gh() then
     return
   end
-  M._info_cache = {}
-  notify 'loading PRs...'
+  opts = opts or {}
+  local scope = opts.scope or 'mine'
+  local base_filter
+  if opts.all_bases then
+    base_filter = nil
+  elseif opts.base_filter ~= nil then
+    base_filter = opts.base_filter
+  else
+    base_filter = M.config.base_filter
+  end
 
-  local search = M.config.search
+  M._info_cache = {}
+  notify(scope == 'all' and 'loading PRs awaiting review...' or 'loading PRs...')
+
+  local search = scope == 'all' and M.config.all_search or M.config.search
   if M.config.hide_approved then
     search = search .. ' -review:approved'
   end
@@ -610,10 +837,9 @@ function M.pick()
       return
     end
     if #prs == 0 then
-      notify 'no PRs awaiting your review'
-      return
+      notify(scope == 'all' and 'no open PRs awaiting review' or 'no PRs awaiting your review')
     end
-    M.show_picker(prs, M.config.base_filter)
+    M.show_picker(prs, base_filter, scope)
   end)
 end
 
@@ -868,13 +1094,8 @@ local function in_diff_window()
 end
 
 --- Open the working-tree copy of the file under review in a new tab, at the
---- same line, where LSP actually works.
----
---- The diff buffers are `diffview://` scratch buffers holding a git blob from a
---- revision that was never checked out, so no language server can attach to
---- them or resolve anything around them. This is your branch's copy of the
---- file, not the PR's -- fine for "where is this defined" and "who calls this",
---- wrong for any line the PR actually changed.
+--- same line. gd on the diff already talks to LSP using the PR text; this is
+--- the escape hatch when you want your branch's file instead.
 function M.open_local()
   local ok, lib = pcall(require, 'diffview.lib')
   local view = ok and lib.get_current_view()
@@ -1426,12 +1647,14 @@ map('[h', function()
 end, 'Previous git hunk')
 
 vim.api.nvim_create_user_command('PRReview', function(opts)
-  if opts.args and opts.args ~= '' then
+  if opts.args == 'all' then
+    M.pick { scope = 'all' }
+  elseif opts.args and opts.args ~= '' then
     M.open_number(opts.args)
   else
     M.pick()
   end
-end, { nargs = '?', desc = 'Review a PR: pick from your queue, or pass a number/url' })
+end, { nargs = '?', desc = 'Review a PR: pick from your queue, all open PRs, or a number/url' })
 
 vim.api.nvim_create_user_command('PRUncomment', function(opts)
   M.unqueue(opts.args)
@@ -1440,5 +1663,13 @@ end, { nargs = 1, desc = 'Drop a queued review comment by index' })
 vim.api.nvim_create_user_command('PRClose', function()
   M.close_pr()
 end, { desc = 'Close the current PR, sending gn notes and queued comments' })
+
+vim.api.nvim_create_autocmd('User', {
+  pattern = 'DiffviewDiffBufRead',
+  group = vim.api.nvim_create_augroup('pr-review-diff-lsp', { clear = true }),
+  callback = function()
+    M.attach_diff_lsp(vim.api.nvim_get_current_buf())
+  end,
+})
 
 return M
