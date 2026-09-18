@@ -13,3 +13,6 @@ LSP coverage also checks package-root callbacks, linked-worktree paths, excluded
 lint servers, duplicate attachment, deferred visible-buffer attachment, and `gd`
 against the real Mason-installed Lua language server. Install that server before
 running the suite. No fixture language server accesses GitHub.
+
+The real Telescope picker is also exercised through preview and selection. A
+late direct-number metadata response cannot replace a newer review selection.

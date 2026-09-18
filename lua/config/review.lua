@@ -925,8 +925,16 @@ function M.open_number(arg)
     if not root then
       return notify('not inside a git repo', vim.log.levels.ERROR)
     end
+    open_generation = open_generation + 1
+    local generation = open_generation
+    if cancel_open_summary then
+      cancel_open_summary()
+    end
     notify('loading #' .. number .. '...')
     run({ 'gh', 'pr', 'view', number, '--json', FIELDS }, function(res)
+      if generation ~= open_generation then
+        return
+      end
       if res.code ~= 0 then
         notify(('could not load #%s: %s'):format(number, res.stderr or ''), vim.log.levels.ERROR)
         return

@@ -102,8 +102,35 @@ vim.defer_fn(function()
       return false
     end)
     assert(review.current.number == 1, 'stale fetch must not replace review')
+    review.open_number(2)
+    review.open(pr(1))
+    vim.wait(400, function()
+      return false
+    end)
+    assert(review.current.number == 1, 'late metadata must not supersede a newer open')
+    vim.o.columns = 160
+    vim.o.lines = 50
+    local before_picker = counts[1]
+    review.show_picker({ pr(1) }, nil)
+    local prompt = vim.api.nvim_get_current_buf()
+    local picker = require('telescope.actions.state').get_current_picker(prompt)
+    assert(
+      vim.wait(2000, function()
+        local buf = picker.previewer.state and picker.previewer.state.bufnr
+        return buf and table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n'):find 'Summary fixture'
+      end),
+      'real Telescope preview must render cached summary'
+    )
+    require('telescope.actions').select_default(prompt)
+    assert(
+      vim.wait(2000, function()
+        return summary_visible(1)
+      end),
+      'picker selection opens review'
+    )
+    assert(counts[1] == before_picker, 'picker-to-open must reuse summary without another request')
     vim.fn.writefile(
-      { ('PASS populated %.1fms; empty %.1fms; navigation, cache, refresh, latest-open'):format(first_ms, empty_ms) },
+      { ('PASS populated %.1fms; empty %.1fms; navigation, cache, refresh, latest-open, metadata race, Telescope handoff'):format(first_ms, empty_ms) },
       vim.env.REVIEW_TEST_RESULT
     )
   end, debug.traceback)
