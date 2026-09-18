@@ -15,7 +15,10 @@ lint servers, duplicate attachment, deferred visible-buffer attachment, and `gd`
 against the real Mason-installed Lua language server. Install that server before
 running the suite. No fixture language server accesses GitHub.
 
-The real Telescope picker is also exercised through preview and selection. A
+The real Telescope picker is also exercised through immediate description
+preview, early-close cancellation, background Git prefetch, and selection without
+a duplicate fetch. Unit tests verify bounded prefetch concurrency, latest-row
+queue replacement, foreground adoption, and recovery after background errors. A
 late direct-number metadata response cannot replace a newer review selection.
 
 The editor tests additionally cover asynchronous Make jobs and error output,

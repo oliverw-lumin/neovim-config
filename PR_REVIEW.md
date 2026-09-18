@@ -13,9 +13,17 @@ Use `:PRReview!` to refresh the list, `:PRReview! 123` to refresh a numbered PR,
 or `<leader>gR` to refresh the current PR's metadata, refs, and summary.
 `<leader>gi` refreshes just the summary, comments, and reviews.
 
-The picker and review share cached and in-flight requests. Fast scrolling waits
-120 ms before making a request and cancels abandoned previews. Cache write
-failures do not prevent reviews, and failed requests are never cached.
+The PR list includes descriptions so the picker can show readable previews
+without another network request. Cached full summaries appear immediately,
+without the preview debounce. Comments and reviews load after a 120 ms pause.
+After 220 ms on the same row, the picker prefetches its Git refs in the background;
+selecting the PR shares that fetch or reuses its cached result. Diffview and
+language servers start only when you open the PR.
+
+Only one speculative Git fetch runs at a time. Scrolling or closing the picker
+cancels queued work; a running fetch finishes into the cache. Failed prefetches
+are silent and retried on opening. Cache write failures do not prevent reviews,
+and failed requests are never cached.
 
 Diff language servers start after a buffer stays visible for 150 ms. Buffers
 hidden behind the overview do not start servers. Review buffers use the normal

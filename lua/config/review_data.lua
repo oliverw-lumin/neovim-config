@@ -4,6 +4,7 @@ local cache, pending = {}, {}
 M.fields = table.concat({
   'number',
   'title',
+  'body',
   'author',
   'baseRefName',
   'baseRefOid',
@@ -124,6 +125,13 @@ local function valid_pr(number)
     return type(data) == 'table' and data.number == tonumber(number)
   end
 end
+-- Synchronous local lookup lets the picker paint before any debounce/network work.
+function M.peek_summary(root, number)
+  local hit = read(key_for(root, 'summary', number), 300)
+  if hit and valid_pr(number)(hit) then
+    return vim.deepcopy(hit)
+  end
+end
 function M.summary(root, number, callback, force)
   return request(root, 'summary', number, { 'gh', 'pr', 'view', tostring(number), '--json', summary_fields }, 300, valid_pr(number), callback, force)
 end
@@ -239,5 +247,30 @@ function M.fetch(root, remote, pr, callback, force)
       fetch()
     end
   end)
+end
+-- Keep speculative Git traffic bounded. A running fetch finishes into the cache;
+-- only the latest still-visible selection can start after it. Foreground opens
+-- share M.fetch's in-flight request, even after the picker has closed.
+local prefetch_running, prefetch_queued
+local function drain_prefetch()
+  if prefetch_running or not prefetch_queued then
+    return
+  end
+  local item = prefetch_queued
+  prefetch_queued, prefetch_running = nil, item
+  M.fetch(item.root, item.remote, item.pr, function()
+    prefetch_running = nil
+    drain_prefetch()
+  end)
+end
+function M.prefetch(root, remote, pr)
+  local item = { root = root, remote = remote, pr = vim.deepcopy(pr) }
+  prefetch_queued = item
+  drain_prefetch()
+  return function()
+    if prefetch_queued == item then
+      prefetch_queued = nil
+    end
+  end
 end
 return M

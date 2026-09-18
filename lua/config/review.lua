@@ -685,7 +685,7 @@ function M.show_picker(prs, base_filter, scope)
   scope = scope or 'mine'
   local root = prs[1] and prs[1]._root or git_root()
   local preview_generation = 0
-  local cancel_preview
+  local cancel_preview, cancel_prefetch
   local pickers = require 'telescope.pickers'
   local finders = require 'telescope.finders'
   local conf = require('telescope.config').values
@@ -754,6 +754,9 @@ function M.show_picker(prs, base_filter, scope)
           if cancel_preview then
             cancel_preview()
           end
+          if cancel_prefetch then
+            cancel_prefetch()
+          end
         end,
         -- One preview buffer per PR, so a slow gh call still lands in the
         -- buffer belonging to the entry that asked for it.
@@ -780,7 +783,29 @@ function M.show_picker(prs, base_filter, scope)
           if cancel_preview then
             cancel_preview()
           end
-          fill(('# #%d %s\n\nloading...'):format(number, entry.value.title or ''))
+          if cancel_prefetch then
+            cancel_prefetch()
+          end
+          local cached = review_data.peek_summary(root, number)
+          local initial = cached or vim.deepcopy(entry.value)
+          if initial.body == nil then
+            initial.body = '_Loading description…_'
+          end
+          local preview = render_info(initial)
+          if not cached then
+            preview = preview .. '\n\n_Loading comments and reviews…_'
+          end
+          fill(preview)
+          -- Give the preview a chance to paint; don't fetch every row while
+          -- scrolling. No Diffview windows or language servers start here.
+          vim.defer_fn(function()
+            if generation == preview_generation and vim.api.nvim_buf_is_valid(bufnr) then
+              cancel_prefetch = review_data.prefetch(root, M.config.remote, entry.value)
+            end
+          end, 220)
+          if cached then
+            return
+          end
           -- Scrolling quickly should not launch a GitHub request per row.
           vim.defer_fn(function()
             if generation ~= preview_generation or not vim.api.nvim_buf_is_valid(bufnr) then
@@ -788,7 +813,7 @@ function M.show_picker(prs, base_filter, scope)
             end
             cancel_preview = review_data.summary(root, number, function(err, data)
               if generation == preview_generation then
-                fill(err or render_info(data))
+                fill(err and (preview .. '\n\n' .. err) or render_info(data))
               end
             end)
           end, 120)

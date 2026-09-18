@@ -121,6 +121,29 @@ pr.headRefOid = 'dddd'
 fresh.fetch('/one', 'origin', pr, function() end)
 assert(jobs[#jobs].cmd[2] == 'fetch', 'new advertised head must fetch')
 finish(jobs[#jobs], { code = 1, stderr = 'offline' })
+assert(fresh.peek_summary('/one', 7).number == 7, 'preview can read summary without a request')
+local before_prefetch = #jobs
+local a = { number = 10, baseRefName = 'main' }
+fresh.prefetch('/prefetch', 'origin', a)
+local adopted = false
+fresh.fetch('/prefetch', 'origin', a, function(err)
+  assert(not err)
+  adopted = true
+end)
+assert(#jobs == before_prefetch + 1, 'opening must adopt speculative fetch')
+fresh.prefetch('/prefetch', 'origin', { number = 11, baseRefName = 'main' })
+local cancel_last = fresh.prefetch('/prefetch', 'origin', { number = 12, baseRefName = 'main' })
+cancel_last()
+assert(#jobs == before_prefetch + 1, 'background fetches must be bounded')
+finish(jobs[#jobs], { code = 0, stdout = '' })
+finish(jobs[#jobs], { code = 0, stdout = 'aaaa\ncccc\n' })
+assert(adopted and #jobs == before_prefetch + 2, 'abandoned queued rows must not fetch')
+fresh.prefetch('/prefetch', 'origin', { number = 20, baseRefName = 'main' })
+fresh.prefetch('/prefetch', 'origin', { number = 21, baseRefName = 'main' })
+fresh.prefetch('/prefetch', 'origin', { number = 22, baseRefName = 'main' })
+finish(jobs[#jobs], { code = 1, stderr = 'offline' })
+assert(table.concat(jobs[#jobs].cmd, ' '):find('refs/pull/22/head', 1, true), 'only latest queued row should fetch after failure')
+finish(jobs[#jobs], { code = 1, stderr = 'offline' })
 vim.fn.delete(directory, 'rf')
 print 'PASS persistent summaries and list cache, sharing, cancellation, handoff, refresh, errors'
 vim.cmd 'qa!'

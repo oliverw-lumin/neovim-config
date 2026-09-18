@@ -47,8 +47,37 @@ end
 vim.defer_fn(function()
   local ok, err = xpcall(function()
     local review = require 'config.review'
+    vim.o.columns = 160
+    vim.o.lines = 50
+    local first = pr(1)
+    first.body = 'Description immediately available from the PR list'
+    review.show_picker({ first }, nil)
+    local initial_prompt = vim.api.nvim_get_current_buf()
+    local initial_picker = require('telescope.actions.state').get_current_picker(initial_prompt)
+    assert(
+      vim.wait(1000, function()
+        local buf = initial_picker.previewer.state and initial_picker.previewer.state.bufnr
+        return buf and table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n'):find(first.body, 1, true)
+      end, 1),
+      'description should render before network response'
+    )
+    assert(not counts[1], 'first preview must not wait for GitHub')
+    require('telescope.actions').close(initial_prompt)
+    vim.wait(260, function()
+      return false
+    end)
+    assert(fetch_count == 0 and not counts[1], 'closing promptly must cancel deferred preview work')
+    review.show_picker({ first }, nil)
+    initial_prompt = vim.api.nvim_get_current_buf()
+    assert(
+      vim.wait(2000, function()
+        return fetch_count == 1
+      end),
+      'reading the preview must prefetch Git refs'
+    )
+    assert(not review.current, 'prefetch must not open a review')
     local start = vim.uv.hrtime()
-    review.open(pr(1))
+    require('telescope.actions').select_default(initial_prompt)
     assert(
       vim.wait(5000, function()
         return summary_visible(1)
@@ -56,6 +85,7 @@ vim.defer_fn(function()
       'populated PR summary: ' .. table.concat(messages, '\n')
     )
     local first_ms = (vim.uv.hrtime() - start) / 1e6
+    assert(fetch_count == 1, 'selecting prefetched PR must not fetch twice')
     assert(first_ms < 1900, 'summary still waits on fallback timer')
     local view = require('diffview.lib').get_current_view()
     assert(view and view.files:len() == 1, 'diff must contain feature change')
