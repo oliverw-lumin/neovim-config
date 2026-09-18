@@ -617,7 +617,6 @@ function M.open(pr, opts)
     end, opts.force)
   end
   local started = vim.uv.hrtime()
-  notify(('#%d opening…'):format(pr.number))
   review_data.fetch(root, remote, pr, function(err, refs, cached)
     if generation ~= open_generation then
       return
@@ -666,14 +665,9 @@ function M.open(pr, opts)
       end
     end
     local pending = #load_queue(pr.number)
-    notify(
-      ('#%d %s%s%s'):format(
-        pr.number,
-        pr.title,
-        cached and ' [cached; <leader>gR refreshes]' or '',
-        pending > 0 and (' (%d comments still queued)'):format(pending) or ''
-      )
-    )
+    if pending > 0 then
+      notify(('%d comments still queued for #%d'):format(pending, pr.number))
+    end
   end, opts.force)
 end
 
@@ -710,7 +704,6 @@ function M.show_picker(prs, base_filter, scope)
     end
   end
   if #shown == 0 and base_filter then
-    notify(('nothing targeting %s -- showing all bases'):format(base_filter))
     shown, base_filter = candidates, nil
   end
 
@@ -726,6 +719,8 @@ function M.show_picker(prs, base_filter, scope)
   pickers
     .new({}, {
       prompt_title = title,
+      layout_strategy = 'vertical',
+      layout_config = { width = 0.95, height = 0.95, preview_height = 0.7, preview_cutoff = 0, prompt_position = 'top' },
       finder = finders.new_table {
         results = shown,
         entry_maker = function(pr)
@@ -748,7 +743,15 @@ function M.show_picker(prs, base_filter, scope)
       -- Preview the PR summary -- the same thing <leader>gi shows once it is
       -- open -- rather than the first file's diff.
       previewer = previewers.new_buffer_previewer {
-        title = 'PR summary',
+        title = 'Description & details | C-d/C-u scroll | C-End/C-Home end/start',
+        scroll_fn = function(self, direction)
+          local win = self.state and self.state.winid
+          if win and vim.api.nvim_win_is_valid(win) then
+            vim.api.nvim_win_call(win, function()
+              vim.cmd.normal { args = { math.abs(direction) .. string.char(direction > 0 and 5 or 25) }, bang = true }
+            end)
+          end
+        end,
         teardown = function()
           preview_generation = preview_generation + 1
           if cancel_preview then
@@ -766,13 +769,28 @@ function M.show_picker(prs, base_filter, scope)
         define_preview = function(self, entry)
           local number = entry.value.number
           local bufnr = self.state.bufnr
+          local win = self.state.winid
+          vim.wo[win].wrap = true
+          vim.wo[win].linebreak = true
+          vim.wo[win].breakindent = true
+          vim.wo[win].smoothscroll = true
+          vim.wo[win].conceallevel = 0
 
           local function fill(text)
             if not vim.api.nvim_buf_is_valid(bufnr) then
               return
             end
+            local saved_view
+            if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == bufnr then
+              saved_view = vim.api.nvim_win_call(win, vim.fn.winsaveview)
+            end
             vim.bo[bufnr].modifiable = true
             vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, vim.split(text, '\n', { plain = true }))
+            if saved_view then
+              vim.api.nvim_win_call(win, function()
+                vim.fn.winrestview(saved_view)
+              end)
+            end
             pcall(function()
               require('telescope.previewers.utils').highlighter(bufnr, 'markdown')
             end)
@@ -845,6 +863,27 @@ function M.show_picker(prs, base_filter, scope)
             all_bases = base_filter == nil,
           }
         end
+        local function preview_edge(at_end)
+          local picker = action_state.get_current_picker(prompt_bufnr)
+          local win = picker.previewer.state.winid
+          if win and vim.api.nvim_win_is_valid(win) then
+            vim.api.nvim_win_call(win, function()
+              vim.cmd.normal { args = { at_end and 'G$zb' or 'ggzt' }, bang = true }
+            end)
+          end
+        end
+        for _, mode in ipairs { 'i', 'n' } do
+          map(mode, '<C-d>', actions.preview_scrolling_down)
+          map(mode, '<C-u>', actions.preview_scrolling_up)
+          map(mode, '<PageDown>', actions.preview_scrolling_down)
+          map(mode, '<PageUp>', actions.preview_scrolling_up)
+          map(mode, '<C-End>', function()
+            preview_edge(true)
+          end)
+          map(mode, '<C-Home>', function()
+            preview_edge(false)
+          end)
+        end
         map('i', '<C-a>', toggle_base)
         map('n', '<C-a>', toggle_base)
         map('i', '<C-o>', toggle_scope)
@@ -874,19 +913,15 @@ function M.pick(opts)
   if not root then
     return notify('not inside a git repo', vim.log.levels.ERROR)
   end
-  notify(scope == 'all' and 'loading PRs awaiting review...' or 'loading PRs...')
 
   local search = scope == 'all' and M.config.all_search or M.config.search
   if M.config.hide_approved then
     search = search .. ' -review:approved'
   end
 
-  review_data.list(root, search, M.config.limit, function(err, prs, cached)
+  review_data.list(root, search, M.config.limit, function(err, prs)
     if err then
       return notify(err, vim.log.levels.ERROR)
-    end
-    if cached then
-      notify 'PR list from cache (up to 5 minutes old); :PRReview! refreshes'
     end
     if #prs == 0 then
       notify(scope == 'all' and 'no open PRs awaiting review' or 'no PRs awaiting your review')
@@ -937,7 +972,6 @@ function M.open_number(arg, opts)
     if cancel_open_summary then
       cancel_open_summary()
     end
-    notify('loading #' .. number .. '...')
     review_data.metadata(root, number, function(err, pr)
       if generation ~= open_generation then
         return

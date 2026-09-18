@@ -50,7 +50,7 @@ vim.defer_fn(function()
     vim.o.columns = 160
     vim.o.lines = 50
     local first = pr(1)
-    first.body = 'Description immediately available from the PR list'
+    first.body = ('A long paragraph that must wrap at word boundaries. '):rep(80) .. '\n' .. ('More description details\n'):rep(100) .. 'END OF DESCRIPTION'
     review.show_picker({ first }, nil)
     local initial_prompt = vim.api.nvim_get_current_buf()
     local initial_picker = require('telescope.actions.state').get_current_picker(initial_prompt)
@@ -61,6 +61,22 @@ vim.defer_fn(function()
       end, 1),
       'description should render before network response'
     )
+    local preview_win = initial_picker.previewer.state.winid
+    local preview_buf = initial_picker.previewer.state.bufnr
+    assert(vim.wo[preview_win].wrap and vim.wo[preview_win].linebreak and vim.wo[preview_win].smoothscroll, 'preview must wrap and scroll long paragraphs')
+    assert(vim.api.nvim_win_get_width(preview_win) > 120, 'description should use the wide layout')
+    local function viewport()
+      return vim.api.nvim_win_call(preview_win, vim.fn.winsaveview)
+    end
+    local before_scroll = viewport()
+    require('telescope.actions').preview_scrolling_down(initial_prompt)
+    local after_scroll = viewport()
+    assert(after_scroll.topline > before_scroll.topline or after_scroll.skipcol > before_scroll.skipcol, 'preview paging must advance the viewport')
+    local end_map = vim.fn.maparg('<C-End>', 'i', false, true)
+    end_map.callback()
+    assert(vim.api.nvim_win_get_cursor(preview_win)[1] == vim.api.nvim_buf_line_count(preview_buf), 'end mapping must reach all details')
+    vim.fn.maparg('<C-Home>', 'i', false, true).callback()
+    assert(vim.api.nvim_win_get_cursor(preview_win)[1] == 1, 'home mapping must return to the start')
     assert(not counts[1], 'first preview must not wait for GitHub')
     require('telescope.actions').close(initial_prompt)
     vim.wait(260, function()
@@ -192,6 +208,7 @@ vim.defer_fn(function()
       end),
       'missing refs recovered'
     )
+    assert(#messages == 0, 'successful review navigation should not emit routine notifications: ' .. table.concat(messages, '; '))
     vim.fn.writefile(
       { ('PASS populated %.1fms; empty %.1fms; navigation, cache, refresh, latest-open, metadata race, Telescope handoff'):format(first_ms, empty_ms) },
       vim.env.REVIEW_TEST_RESULT

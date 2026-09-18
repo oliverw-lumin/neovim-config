@@ -33,3 +33,10 @@ editable files keep their existing configuration. Adjust `review_lsp_exclude` in
 
 Run `python3 tests/run.py` to exercise the importer, picker, request races, and
 LSP navigation. See `tests/README.md` for prerequisites and coverage.
+
+The picker gives most of its height and the full available width to the preview.
+Long paragraphs wrap at word boundaries. Use `<C-d>` / `<C-u>` or Page Down /
+Page Up to scroll, and `<C-End>` / `<C-Home>` to reach the end or start while
+keeping the PR selected. Background summary updates preserve the viewport.
+Routine loading, cache-hit, and opened-PR notifications are suppressed; errors,
+queued-comment reminders, and review-action confirmations remain visible.
