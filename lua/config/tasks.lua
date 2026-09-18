@@ -66,19 +66,42 @@ function M.executables(dirs)
   return result
 end
 
+local remembered
 local function choose_executable(root, callback)
+  local state = vim.fn.stdpath 'data' .. '/make_last_exe.json'
+  if not remembered then
+    remembered = {}
+    local ok, lines = pcall(vim.fn.readfile, state)
+    if ok then
+      local decoded, value = pcall(vim.json.decode, table.concat(lines, '\n'))
+      if decoded and type(value) == 'table' then
+        remembered = value
+      end
+    end
+  end
+  local previous = remembered[root]
+  if type(previous) == 'string' and vim.fn.executable(previous) == 1 and vim.fn.isdirectory(previous) == 0 then
+    return callback(previous)
+  end
+  local function selected(path)
+    if not path or path == '' then
+      return
+    end
+    path = vim.fn.fnamemodify(path, ':p')
+    if vim.fn.executable(path) == 1 and vim.fn.isdirectory(path) == 0 then
+      remembered[root] = path
+      vim.fn.writefile({ vim.json.encode(remembered) }, state)
+    end
+    callback(path)
+  end
   local candidates = M.executables { root .. '/build', root .. '/build/bin', root }
   if #candidates == 1 then
-    return callback(candidates[1])
+    return selected(candidates[1])
   end
   if #candidates > 1 then
-    return vim.ui.select(candidates, { prompt = 'Executable:' }, callback)
+    return vim.ui.select(candidates, { prompt = 'Executable:' }, selected)
   end
-  vim.ui.input({ prompt = 'Executable: ', default = root .. '/', completion = 'file' }, function(path)
-    if path and path ~= '' then
-      callback(vim.fn.fnamemodify(path, ':p'))
-    end
-  end)
+  vim.ui.input({ prompt = 'Executable: ', default = root .. '/', completion = 'file' }, selected)
 end
 
 function M.make(action)
@@ -107,6 +130,19 @@ function M.make(action)
       end
     end)
   end)
+end
+
+function M.cmake(command)
+  local root = project 'CMakeLists.txt'
+  if not root then
+    return
+  end
+  -- cmake-tools owns build state by cwd; switch only this tab to the project.
+  if vim.fn.getcwd() ~= root then
+    vim.cmd('tcd ' .. vim.fn.fnameescape(root))
+  end
+  vim.cmd 'wall'
+  vim.cmd(command)
 end
 
 function M.format_project()

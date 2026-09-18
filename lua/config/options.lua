@@ -22,7 +22,7 @@ vim.g.editorconfig = true
 vim.o.undofile = true
 
 if vim.env.SUDO_USER then
-  local root_dir = '/root/.cache/nvim'
+  local root_dir = vim.fn.expand '~' .. '/.cache/nvim-sudo'
   vim.fn.mkdir(root_dir .. '/swap', 'p')
   vim.fn.mkdir(root_dir .. '/backup', 'p')
   vim.fn.mkdir(root_dir .. '/undo', 'p')
@@ -45,12 +45,3 @@ vim.o.cursorline = true
 vim.o.scrolloff = 10
 vim.o.confirm = true
 vim.opt.fillchars:append { eob = ' ' }
-
-vim.api.nvim_create_autocmd('FileType', {
-  group = vim.api.nvim_create_augroup('indent-folding', { clear = true }),
-  callback = function()
-    if vim.bo.buftype == '' then
-      vim.opt_local.foldmethod = 'indent'
-    end
-  end,
-})

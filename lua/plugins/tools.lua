@@ -68,39 +68,7 @@ return {
     'mfussenegger/nvim-lint',
     event = { 'BufReadPre', 'BufNewFile' },
     config = function()
-      local lint = require 'lint'
-
-      -- cppcheck operates per translation unit and can't see cross-TU usage.
-      -- Suppress checks that produce false positives in multi-file projects.
-      lint.linters.cppcheck.args = vim.list_extend(vim.deepcopy(lint.linters.cppcheck.args), {
-        '--suppress=unusedStructMember',
-      })
-
-      lint.linters_by_ft = {
-        python = { 'ruff' },
-        javascript = {},
-        typescript = {},
-        javascriptreact = {},
-        typescriptreact = {},
-        lua = { 'selene' },
-        c = { 'cppcheck' },
-        cpp = { 'cppcheck' },
-        go = { 'staticcheck' },
-        sh = { 'shellcheck' },
-        bash = { 'shellcheck' },
-        yaml = { 'yamllint' },
-        markdown = {},
-      }
-
-      local lint_augroup = vim.api.nvim_create_augroup('lint', { clear = true })
-      vim.api.nvim_create_autocmd({ 'BufEnter', 'BufWritePost', 'InsertLeave' }, {
-        group = lint_augroup,
-        callback = function()
-          if vim.bo.modifiable then
-            lint.try_lint()
-          end
-        end,
-      })
+      require('config.lint').setup()
     end,
   },
 
@@ -116,21 +84,78 @@ return {
       'CMakeSelectBuildType',
       'CMakeSelectBuildTarget',
       'CMakeSelectLaunchTarget',
+      'CMakeSelectCwd',
+      'CMakeSelectBuildDir',
     },
     keys = {
-      { '<leader>cc', '<cmd>CMakeGenerate<CR>', desc = 'CMake configure' },
-      { '<leader>cg', '<cmd>CMakeGenerate<CR>', desc = 'CMake generate' },
-      { '<leader>cb', '<cmd>wall<CR><cmd>CMakeBuild<CR>', desc = 'CMake build' },
-      { '<leader>cr', '<cmd>wall<CR><cmd>CMakeRun<CR>', desc = 'CMake run' },
-      { '<leader>cd', '<cmd>wall<CR><cmd>CMakeDebug<CR>', desc = 'CMake debug' },
-      { '<leader>ct', '<cmd>CMakeSelectBuildType<CR>', desc = 'Select build type' },
-      { '<leader>cs', '<cmd>CMakeSelectBuildTarget<CR>', desc = 'Select build target' },
-      { '<leader>cT', '<cmd>wall<CR><cmd>CMakeRunTest<CR>', desc = 'CMake tests' },
-      { '<leader>cl', '<cmd>CMakeSelectLaunchTarget<CR>', desc = 'Select launch target' },
+      {
+        '<leader>cc',
+        function()
+          require('config.tasks').cmake 'CMakeGenerate'
+        end,
+        desc = 'CMake configure',
+      },
+      {
+        '<leader>cg',
+        function()
+          require('config.tasks').cmake 'CMakeGenerate'
+        end,
+        desc = 'CMake generate',
+      },
+      {
+        '<leader>cb',
+        function()
+          require('config.tasks').cmake 'CMakeBuild'
+        end,
+        desc = 'CMake build',
+      },
+      {
+        '<leader>cr',
+        function()
+          require('config.tasks').cmake 'CMakeRun'
+        end,
+        desc = 'CMake run',
+      },
+      {
+        '<leader>cd',
+        function()
+          require('config.tasks').cmake 'CMakeDebug'
+        end,
+        desc = 'CMake debug',
+      },
+      {
+        '<leader>ct',
+        function()
+          require('config.tasks').cmake 'CMakeSelectBuildType'
+        end,
+        desc = 'Select build type',
+      },
+      {
+        '<leader>cs',
+        function()
+          require('config.tasks').cmake 'CMakeSelectBuildTarget'
+        end,
+        desc = 'Select build target',
+      },
+      {
+        '<leader>cT',
+        function()
+          require('config.tasks').cmake 'CMakeRunTest'
+        end,
+        desc = 'CMake tests',
+      },
+      {
+        '<leader>cl',
+        function()
+          require('config.tasks').cmake 'CMakeSelectLaunchTarget'
+        end,
+        desc = 'Select launch target',
+      },
     },
     opts = function()
       return {
         cmake_build_directory = 'build',
+        cmake_regenerate_on_save = false,
         cmake_generate_options = { '-DCMAKE_EXPORT_COMPILE_COMMANDS=1' },
         cmake_build_args = { '-j', tostring(require('config.tasks').jobs()) },
         cmake_executor = { name = 'quickfix', opts = {} },

@@ -16,3 +16,12 @@ running the suite. No fixture language server accesses GitHub.
 
 The real Telescope picker is also exercised through preview and selection. A
 late direct-number metadata response cannot replace a newer review selection.
+
+The editor tests additionally cover asynchronous Make jobs and error output,
+executable discovery in paths containing spaces, quickfix/location-list deletion,
+formatter ownership in monorepos, large-file limits, lint debounce/save-only Go
+checks, lazy plugin loading, independent debugger configuration, and LSP highlight
+attachment/detachment. The full-config integration tests perform a real Lua
+language-server definition lookup and a real CMake configure/build in a temporary
+project (requires `make`, `cmake`, and a POSIX shell). Python/Go/LLDB debugger
+configuration is checked, but full debug sessions are not launched by the suite.

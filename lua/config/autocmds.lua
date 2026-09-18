@@ -61,3 +61,12 @@ vim.api.nvim_create_autocmd('FileType', {
     end, { buffer = event.buf, desc = 'Delete list entry' })
   end,
 })
+
+vim.api.nvim_create_autocmd('FileType', {
+  group = vim.api.nvim_create_augroup('indent-folding', { clear = true }),
+  callback = function(event)
+    if vim.bo[event.buf].buftype == '' then
+      vim.opt_local.foldmethod = require('config.buffer').large(event.buf) and 'manual' or 'indent'
+    end
+  end,
+})

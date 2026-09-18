@@ -348,6 +348,12 @@ function M.attach_diff_lsp(bufnr)
     return
   end
 
+  if require('config.buffer').large(bufnr) then
+    return
+  end
+  if package.loaded.lazy then
+    require('lazy').load { plugins = { 'nvim-lspconfig' } }
+  end
   local lib = require 'diffview.lib'
   local view = lib.get_current_view()
   local root = view and view.adapter.ctx.toplevel or git_root()

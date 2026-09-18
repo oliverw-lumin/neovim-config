@@ -9,5 +9,62 @@ assert(require('mason-nvim-dap.settings').current.automatic_installation == fals
 assert(vim.fn.maparg('<space>c', 'n') == '', 'CMake prefix must not also be a change operator')
 assert(vim.fn.maparg('<space>b', 'n') == '', 'buffer prefix must not also toggle breakpoints')
 assert(vim.fn.maparg('<space>Y', 'n', false, true).desc == 'Yank absolute file path')
-io.stdout:write 'PASS full config, CMake/DAP loading, independent debuggers, unambiguous key prefixes\n'
+assert(not package.loaded.conform, 'formatting must not load before first use/save')
+assert(not package.loaded['telescope.builtin'], 'Telescope must not load on startup')
+lazy.load { plugins = { 'nvim-lspconfig' } }
+assert(not package.loaded['telescope.builtin'], 'LSP setup must not eagerly load Telescope')
+assert(vim.lsp.is_enabled 'gopls' and vim.lsp.is_enabled 'biome', 'server setup must not depend on VeryLazy')
+local original_get = vim.lsp.get_client_by_id
+local original_clients = vim.lsp.get_clients
+local fake = {
+  supports_method = function()
+    return true
+  end,
+}
+vim.lsp.get_client_by_id = function()
+  return fake
+end
+local buf = vim.api.nvim_get_current_buf()
+vim.api.nvim_exec_autocmds('LspAttach', { buffer = buf, data = { client_id = 999 } })
+vim.api.nvim_exec_autocmds('LspAttach', { buffer = buf, data = { client_id = 998 } })
+assert(#vim.api.nvim_get_autocmds { group = 'lsp-highlight', buffer = buf } == 4, 'multiple clients must not duplicate cursor callbacks')
+vim.lsp.get_clients = function()
+  return { fake }
+end
+vim.api.nvim_exec_autocmds('LspDetach', { buffer = buf, data = { client_id = 999 } })
+vim.wait(20, function()
+  return false
+end)
+assert(#vim.api.nvim_get_autocmds { group = 'lsp-highlight', buffer = buf } == 4, 'remaining server keeps highlights')
+vim.lsp.get_clients = function()
+  return {}
+end
+vim.api.nvim_exec_autocmds('LspDetach', { buffer = buf, data = { client_id = 998 } })
+vim.wait(20, function()
+  return false
+end)
+assert(#vim.api.nvim_get_autocmds { group = 'lsp-highlight', buffer = buf } == 0)
+vim.lsp.get_client_by_id, vim.lsp.get_clients = original_get, original_clients
+for _, spec in ipairs(require 'plugins.lsp') do
+  if spec[1] == 'stevearc/conform.nvim' then
+    local opts = spec.opts()
+    assert(opts.formatters_by_ft.go[1] == 'goimports')
+    assert(opts.formatters_by_ft.python[1] == 'ruff_fix')
+    local scratch = vim.api.nvim_create_buf(false, true)
+    assert(opts.format_on_save(scratch) == nil, 'scratch buffers must not format on save')
+  end
+end
+vim.api.nvim_exec_autocmds('User', { pattern = 'VeryLazy' })
+assert(vim.fn.exists ':TSInstallCommon' == 2)
+local markdown = vim.api.nvim_create_buf(false, true)
+vim.api.nvim_buf_set_lines(markdown, 0, -1, false, { '# Smoke test', '', '**Markdown rendering**' })
+vim.api.nvim_set_current_buf(markdown)
+vim.bo[markdown].filetype = 'markdown'
+assert(package.loaded['render-markdown'], 'Markdown renderer should load for Markdown')
+local search = require('telescope.config').values
+for _, pattern in ipairs(search.file_ignore_patterns) do
+  assert(not ('src/digit.ts'):find(pattern), 'ignore patterns must not hide unrelated filenames')
+end
+assert(vim.tbl_contains(search.vimgrep_arguments, '--smart-case'))
+io.stdout:write 'PASS full config, lazy tools, independent debuggers, key prefixes, unified LSP/formatting, highlight lifecycle\n'
 vim.cmd 'qa!'
