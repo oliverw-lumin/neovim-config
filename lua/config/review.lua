@@ -12,6 +12,9 @@
 -- the blob as the real project file so gd/grd resolve against the PR text.
 
 local M = {}
+local review_data = require 'config.review_data'
+local open_generation = 0
+local cancel_open_summary
 
 M.config = {
   remote = 'origin',
@@ -42,10 +45,6 @@ M.current = nil
 -- Scratch buffers we created for the current PR, wiped when we move on.
 M._scratch = {}
 
--- Rendered summaries, keyed by PR number, so moving around the picker does not
--- re-run gh for a PR it already fetched. Cleared each time the picker opens.
-M._info_cache = {}
-
 -- Forward declaration: the picker previews what <leader>gi renders, but that
 -- lives further down the file.
 local render_info
@@ -60,27 +59,6 @@ local FIELDS = table.concat({
   'isDraft',
   'url',
   'reviewDecision',
-}, ',')
-
--- `gh pr view --comments` prints the comments *instead of* the preview, so the
--- description is fetched as structured data and rendered here instead.
-local INFO_FIELDS = table.concat({
-  'number',
-  'title',
-  'state',
-  'isDraft',
-  'author',
-  'baseRefName',
-  'headRefName',
-  'url',
-  'body',
-  'labels',
-  'reviewDecision',
-  'additions',
-  'deletions',
-  'changedFiles',
-  'comments',
-  'reviews',
 }, ',')
 
 ---------------------------------------------------------------------------
@@ -100,18 +78,15 @@ local function have_gh()
 end
 
 local function git_root()
-  local out = vim.fn.systemlist 'git rev-parse --show-toplevel'
-  if vim.v.shell_error ~= 0 or not out[1] or out[1] == '' then
-    return nil
-  end
-  return out[1]
+  -- Filesystem lookup handles .git directories and linked-worktree .git files
+  -- without blocking the editor on a shell process for every request/buffer.
+  return vim.fs.root(vim.fn.getcwd(), '.git')
 end
 
---- Run a command off the main loop and hand the result back on it.
---- `opts` is merged into the vim.system options (e.g. { stdin = json }).
+--- Run against the captured repository, even if the user changes tabs.
 local function run(cmd, on_done, opts)
   local options = vim.tbl_extend('force', { text = true, cwd = git_root() }, opts or {})
-  vim.system(cmd, options, function(res)
+  return vim.system(cmd, options, function(res)
     vim.schedule(function()
       on_done(res)
     end)
@@ -369,12 +344,7 @@ function M.attach_diff_lsp(bufnr)
   for _, client in ipairs(vim.lsp.get_clients()) do
     local fts = client.config and client.config.filetypes
     local client_root = client.root_dir or (client.config and client.config.root_dir)
-    if
-      type(fts) == 'table'
-      and vim.tbl_contains(fts, ft)
-      and type(client_root) == 'string'
-      and vim.startswith(abs, client_root)
-    then
+    if type(fts) == 'table' and vim.tbl_contains(fts, ft) and type(client_root) == 'string' and vim.startswith(abs, client_root) then
       if vim.lsp.buf_attach_client(bufnr, client.id) then
         attached = true
       end
@@ -384,11 +354,7 @@ function M.attach_diff_lsp(bufnr)
   for _, name_ in ipairs(enabled_lsp_names()) do
     if vim.lsp.is_enabled(name_) then
       local config = vim.lsp.config[name_]
-      if
-        type(config) == 'table'
-        and type(config.filetypes) == 'table'
-        and vim.tbl_contains(config.filetypes, ft)
-      then
+      if type(config) == 'table' and type(config.filetypes) == 'table' and vim.tbl_contains(config.filetypes, ft) then
         config = vim.deepcopy(config)
         local markers = config.root_markers
         if type(config.root_dir) == 'function' or not config.root_dir then
@@ -578,69 +544,97 @@ end
 --- Fetch the PR head and its base branch, then diff head against the merge
 --- base. Nothing is checked out, so your working tree is untouched.
 function M.open(pr)
-  local remote = M.config.remote
-  local base = pr.baseRefName
+  local root = pr._root or git_root()
+  if not root then
+    notify('not inside a git repo', vim.log.levels.ERROR)
+    return
+  end
+  open_generation = open_generation + 1
+  local generation = open_generation
+  if cancel_open_summary then
+    cancel_open_summary()
+  end
+  local remote, base = M.config.remote, pr.baseRefName
   local ref = ('refs/pr/%d'):format(pr.number)
-
+  local view, ready, summary, summary_error, shown
+  local function overview()
+    if generation ~= open_generation or shown or not ready or not view then
+      return
+    end
+    if not summary and not summary_error then
+      return
+    end
+    local lib = require 'diffview.lib'
+    -- A late response must never replace a different tab or selected file.
+    if lib.get_current_view() ~= view then
+      return
+    end
+    shown = true
+    local text = summary_error or render_info(summary)
+    show_in_main(scratch_buf(('PR #%d'):format(pr.number), text, 'markdown'))
+  end
+  if M.config.overview_on_open then
+    cancel_open_summary = review_data.summary(root, pr.number, function(err, data)
+      summary_error, summary = err, data
+      overview()
+    end)
+  end
   notify(('#%d fetching (%s -> %s)'):format(pr.number, pr.headRefName, base))
-
   run({
     'git',
     'fetch',
+    '--no-tags',
+    '--no-recurse-submodules',
+    '--no-auto-maintenance',
     remote,
     ('+refs/pull/%d/head:%s'):format(pr.number, ref),
     ('+refs/heads/%s:refs/remotes/%s/%s'):format(base, remote, base),
   }, function(res)
+    if generation ~= open_generation then
+      return
+    end
     if res.code ~= 0 then
+      if cancel_open_summary then
+        cancel_open_summary()
+      end
       notify('fetch failed: ' .. (res.stderr or ''), vim.log.levels.ERROR)
       return
     end
-    -- Leave the previous review behind before opening this one.
     if M.config.close_previous then
       close_previous(M.current and M.current.number)
     end
-
+    pr._root = root
     M.current = pr
-    -- Three dots: merge base of the PR's own target branch vs the PR head, so
-    -- merges of the base back into the branch do not show up as the author's
-    -- changes.
-    local ok, err = pcall(vim.cmd, ('DiffviewOpen %s/%s...%s'):format(remote, base, ref))
+    local ok, err = pcall(vim.cmd, ('DiffviewOpen -C=%s %s/%s...%s'):format(vim.fn.fnameescape(root), remote, base, ref))
     if not ok then
       notify('DiffviewOpen failed: ' .. tostring(err), vim.log.levels.ERROR)
       return
     end
-    -- Land on the PR summary rather than whichever file diffview opened first.
-    -- Registered after DiffviewOpen (DiffviewGlobal only exists once the plugin
-    -- has loaded) but before its async file loading finishes, so the event is
-    -- still ahead of us.
-    if M.config.overview_on_open then
-      local shown = false
-      local function overview()
-        if shown then
-          return
+    view = require('diffview.lib').get_current_view()
+    if view and M.config.overview_on_open then
+      local function loaded()
+        ready = true
+        vim.schedule(overview)
+      end
+      view.emitter:once('file_open_post', loaded)
+      view.emitter:once('files_updated', function(_, files)
+        if files:len() == 0 then
+          loaded()
         end
-        shown = true
-        M.info { pr = pr, main_only = true }
+      end)
+      -- Do not steal focus after the user starts navigating the diff.
+      view.emitter:on('file_open_pre', function()
+        if ready then
+          shown = true
+        end
+      end)
+      if view.initialized and view.cur_entry then
+        loaded()
       end
-
-      local global = rawget(_G, 'DiffviewGlobal')
-      local emitter = global and global.emitter
-      if emitter and emitter.once then
-        emitter:once('diff_buf_win_enter', function()
-          vim.schedule(overview)
-        end)
-      end
-      -- Fallback: a PR with no files never fires that event.
-      vim.defer_fn(overview, 2000)
     end
-
     local pending = #load_queue(pr.number)
-    if pending > 0 then
-      notify(('#%d %s (%d comments still queued)'):format(pr.number, pr.title, pending))
-    else
-      notify(('#%d %s'):format(pr.number, pr.title))
-    end
-  end)
+    notify(('#%d %s%s'):format(pr.number, pr.title, pending > 0 and (' (%d comments still queued)'):format(pending) or ''))
+  end, { cwd = root })
 end
 
 ---------------------------------------------------------------------------
@@ -649,6 +643,9 @@ end
 
 function M.show_picker(prs, base_filter, scope)
   scope = scope or 'mine'
+  local root = prs[1] and prs[1]._root or git_root()
+  local preview_generation = 0
+  local cancel_preview
   local pickers = require 'telescope.pickers'
   local finders = require 'telescope.finders'
   local conf = require('telescope.config').values
@@ -684,8 +681,7 @@ function M.show_picker(prs, base_filter, scope)
 
   local who = scope == 'all' and 'Awaiting review' or 'Your review queue'
   local hint = scope == 'all' and 'C-o yours' or 'C-o all'
-  local title = base_filter and ('%s -> %s  (%s)'):format(who, base_filter, hint)
-    or ('%s (all bases)  (%s)'):format(who, hint)
+  local title = base_filter and ('%s -> %s  (%s)'):format(who, base_filter, hint) or ('%s (all bases)  (%s)'):format(who, hint)
 
   pickers
     .new({}, {
@@ -713,6 +709,12 @@ function M.show_picker(prs, base_filter, scope)
       -- open -- rather than the first file's diff.
       previewer = previewers.new_buffer_previewer {
         title = 'PR summary',
+        teardown = function()
+          preview_generation = preview_generation + 1
+          if cancel_preview then
+            cancel_preview()
+          end
+        end,
         -- One preview buffer per PR, so a slow gh call still lands in the
         -- buffer belonging to the entry that asked for it.
         get_buffer_by_name = function(_, entry)
@@ -733,26 +735,23 @@ function M.show_picker(prs, base_filter, scope)
             end)
           end
 
-          if M._info_cache[number] then
-            fill(M._info_cache[number])
-            return
+          preview_generation = preview_generation + 1
+          local generation = preview_generation
+          if cancel_preview then
+            cancel_preview()
           end
-
           fill(('# #%d %s\n\nloading...'):format(number, entry.value.title or ''))
-
-          run({ 'gh', 'pr', 'view', tostring(number), '--json', INFO_FIELDS }, function(res)
-            if res.code ~= 0 then
-              fill('gh pr view failed:\n\n' .. (res.stderr or ''))
+          -- Scrolling quickly should not launch a GitHub request per row.
+          vim.defer_fn(function()
+            if generation ~= preview_generation or not vim.api.nvim_buf_is_valid(bufnr) then
               return
             end
-            local ok, data = pcall(vim.json.decode, res.stdout)
-            if not ok or type(data) ~= 'table' then
-              fill 'could not parse gh output'
-              return
-            end
-            M._info_cache[number] = render_info(data)
-            fill(M._info_cache[number])
-          end)
+            cancel_preview = review_data.summary(root, number, function(err, data)
+              if generation == preview_generation then
+                fill(err or render_info(data))
+              end
+            end)
+          end, 120)
         end,
       },
       attach_mappings = function(prompt_bufnr, map)
@@ -806,7 +805,10 @@ function M.pick(opts)
     base_filter = M.config.base_filter
   end
 
-  M._info_cache = {}
+  local root = git_root()
+  if not root then
+    return notify('not inside a git repo', vim.log.levels.ERROR)
+  end
   notify(scope == 'all' and 'loading PRs awaiting review...' or 'loading PRs...')
 
   local search = scope == 'all' and M.config.all_search or M.config.search
@@ -839,8 +841,11 @@ function M.pick(opts)
     if #prs == 0 then
       notify(scope == 'all' and 'no open PRs awaiting review' or 'no PRs awaiting your review')
     end
+    for _, pr in ipairs(prs) do
+      pr._root = root
+    end
     M.show_picker(prs, base_filter, scope)
-  end)
+  end, { cwd = root })
 end
 
 --- Open any PR by number, whether or not it is assigned to you. Accepts
@@ -872,6 +877,10 @@ function M.open_number(arg)
       return
     end
 
+    local root = git_root()
+    if not root then
+      return notify('not inside a git repo', vim.log.levels.ERROR)
+    end
     notify('loading #' .. number .. '...')
     run({ 'gh', 'pr', 'view', number, '--json', FIELDS }, function(res)
       if res.code ~= 0 then
@@ -883,8 +892,9 @@ function M.open_number(arg)
         notify('could not parse gh output', vim.log.levels.ERROR)
         return
       end
+      pr._root = root
       M.open(pr)
-    end)
+    end, { cwd = root })
   end
 
   if arg and arg ~= '' then
@@ -943,7 +953,7 @@ function render_info(d)
     for _, label in ipairs(d.labels) do
       table.insert(names, label.name)
     end
-    add('')
+    add ''
     add('labels: ' .. table.concat(names, ', '))
   end
 
@@ -1029,23 +1039,23 @@ function M.info(opts)
   if not pr then
     return
   end
-  run({ 'gh', 'pr', 'view', tostring(pr.number), '--json', INFO_FIELDS }, function(res)
-    if res.code ~= 0 then
-      if not opts.main_only then
-        notify('gh pr view failed: ' .. (res.stderr or ''), vim.log.levels.ERROR)
-      end
+  local root = pr._root or git_root()
+  if not root then
+    return
+  end
+  local generation = open_generation
+  review_data.summary(root, pr.number, function(err, data)
+    if generation ~= open_generation then
       return
     end
-    local ok, data = pcall(vim.json.decode, res.stdout)
-    if not ok or type(data) ~= 'table' then
-      notify('could not parse gh output', vim.log.levels.ERROR)
-      return
+    if err then
+      return notify(err, vim.log.levels.ERROR)
     end
     local buf = scratch_buf(('PR #%d'):format(pr.number), render_info(data), 'markdown')
     if not show_in_main(buf) and not opts.main_only then
       open_split(buf)
     end
-  end)
+  end, true) -- Explicit <leader>gi always refreshes comments/reviews.
 end
 
 --- Open the PR on github.com in the system browser.
@@ -1304,7 +1314,7 @@ function M.queued()
     table.insert(lines, ('%d. [%s] %s:%s  %s'):format(i, c.side, c.path, where, head))
   end
   table.insert(lines, '')
-  table.insert(lines, ('-- :PRUncomment <n> to drop one, <leader>gQ to clear all'))
+  table.insert(lines, '-- :PRUncomment <n> to drop one, <leader>gQ to clear all')
   scratch(('PR #%d queued comments'):format(pr.number), table.concat(lines, '\n'))
 end
 
@@ -1404,10 +1414,7 @@ local function submit_review(pr, kind, opts)
   -- A verdict needs something behind it, but line comments count -- an empty
   -- summary is fine when you have already said it inline.
   if body == '' and #queue == 0 and ev.event ~= 'APPROVE' then
-    notify(
-      ev.label .. ' needs a summary (<leader>gn) or at least one line comment',
-      vim.log.levels.WARN
-    )
+    notify(ev.label .. ' needs a summary (<leader>gn) or at least one line comment', vim.log.levels.WARN)
     return
   end
   local payload = { commit_id = pr.headRefOid }
@@ -1511,10 +1518,7 @@ function M.close_pr()
 
   local prompt
   if body ~= '' or #queue > 0 then
-    prompt = ('Close #%d on GitHub, sending gn notes and %d line comment(s)?'):format(
-      pr.number,
-      #queue
-    )
+    prompt = ('Close #%d on GitHub, sending gn notes and %d line comment(s)?'):format(pr.number, #queue)
   else
     prompt = ('Close #%d on GitHub with no comment?'):format(pr.number)
   end
@@ -1568,7 +1572,7 @@ function M.permalink()
   end
   local rel = repo_relative(vim.fn.expand '%:p')
   if not rel then
-    notify('could not work out this file\'s path in the repo', vim.log.levels.WARN)
+    notify("could not work out this file's path in the repo", vim.log.levels.WARN)
     return
   end
 
