@@ -8,3 +8,8 @@ picker-to-open handoff, explicit refresh, error recovery, actual Diffview openin
 with changed and empty PRs, file navigation after the overview, and overlapping
 open requests. The 1.9-second assertion catches the former fixed two-second wait;
 printed timings use local Git and mocked GitHub, not real-network benchmarks.
+
+LSP coverage also checks package-root callbacks, linked-worktree paths, excluded
+lint servers, duplicate attachment, deferred visible-buffer attachment, and `gd`
+against the real Mason-installed Lua language server. Install that server before
+running the suite. No fixture language server accesses GitHub.

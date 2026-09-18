@@ -12,7 +12,8 @@ def run(args, cwd=config, env=None):
         raise RuntimeError(result.stdout + result.stderr)
     return result.stdout + result.stderr
 
-print(run(['nvim', '--headless', '-u', 'NONE', '-i', 'NONE', '-l', 'tests/review_data.lua']).strip())
+for test in ['review_data.lua', 'review_lsp.lua', 'review_lsp_navigation.lua']:
+    print(run(['nvim', '--headless', '-u', 'NONE', '-i', 'NONE', '-l', 'tests/' + test]).strip())
 with tempfile.TemporaryDirectory(prefix='nvim-review-test-') as folder:
     base = Path(folder)
     source, checkout = base / 'source', base / 'checkout'

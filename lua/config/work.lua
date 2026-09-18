@@ -59,7 +59,7 @@ local typescript_filetypes = {
 }
 
 local function local_tsserver(bufnr, root_dir)
-  local filename = vim.api.nvim_buf_get_name(bufnr)
+  local filename = vim.b[bufnr].review_lsp_path or vim.api.nvim_buf_get_name(bufnr)
   if filename == '' then
     return
   end

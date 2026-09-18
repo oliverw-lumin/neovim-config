@@ -252,8 +252,8 @@ return {
       local actions = require 'diffview.actions'
       return {
         hooks = {
-          diff_buf_read = function(bufnr)
-            require('config.review').attach_diff_lsp(bufnr)
+          diff_buf_win_enter = function(bufnr)
+            require('config.review').prepare_diff_lsp(bufnr)
           end,
         },
         file_panel = {

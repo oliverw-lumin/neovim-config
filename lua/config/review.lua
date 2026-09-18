@@ -37,6 +37,8 @@ M.config = {
   close_previous = true,
   -- Leave out PRs that already carry an approving review decision.
   hide_approved = true,
+  -- Diff buffers need navigation, not a second lint/CSS indexing pipeline.
+  review_lsp_exclude = { 'biome', 'eslint', 'tailwindcss' },
 }
 
 -- The PR currently being reviewed, as returned by `gh pr list --json`.
@@ -313,6 +315,21 @@ local function map_review_lsp(bufnr)
   bufmap('grD', 'textDocument/declaration', 'Goto declaration', 'no declaration')
 end
 
+vim.api.nvim_create_autocmd('LspAttach', {
+  group = vim.api.nvim_create_augroup('pr-review-lsp-maps', { clear = true }),
+  callback = function(event)
+    if not vim.b[event.buf].review_lsp_path then
+      return
+    end
+    -- Normal LspAttach mappings run during async server initialisation.
+    vim.schedule(function()
+      if vim.api.nvim_buf_is_valid(event.buf) then
+        map_review_lsp(event.buf)
+      end
+    end)
+  end,
+})
+
 function M.attach_diff_lsp(bufnr)
   bufnr = bufnr or vim.api.nvim_get_current_buf()
   if not vim.api.nvim_buf_is_valid(bufnr) then
@@ -323,7 +340,7 @@ function M.attach_diff_lsp(bufnr)
     return
   end
   local name = vim.api.nvim_buf_get_name(bufnr)
-  if name == '' or name:find('diffview://null', 1, true) then
+  if not vim.startswith(name, 'diffview://') or name:find('diffview://null', 1, true) then
     return
   end
   local ft = vim.bo[bufnr].filetype
@@ -331,8 +348,17 @@ function M.attach_diff_lsp(bufnr)
     return
   end
 
-  local rel = repo_relative(name)
-  local root = git_root()
+  local lib = require 'diffview.lib'
+  local view = lib.get_current_view()
+  local root = view and view.adapter.ctx.toplevel or git_root()
+  local git_dir = view and view.adapter.ctx.dir
+  local prefix = git_dir and ('diffview://' .. git_dir .. '/')
+  local rel
+  if prefix and vim.startswith(name, prefix) then
+    rel = name:sub(#prefix + 1):match '^[^/]+/(.+)$'
+  else
+    rel = repo_relative(name)
+  end
   if not rel or not root then
     return
   end
@@ -340,49 +366,64 @@ function M.attach_diff_lsp(bufnr)
   vim.b[bufnr].review_lsp_path = abs
   patch_review_uris()
 
-  local attached = false
-  for _, client in ipairs(vim.lsp.get_clients()) do
-    local fts = client.config and client.config.filetypes
-    local client_root = client.root_dir or (client.config and client.config.root_dir)
-    if type(fts) == 'table' and vim.tbl_contains(fts, ft) and type(client_root) == 'string' and vim.startswith(abs, client_root) then
-      if vim.lsp.buf_attach_client(bufnr, client.id) then
-        attached = true
-      end
-    end
+  if vim.b[bufnr].review_lsp_attempted then
+    return
   end
+  vim.b[bufnr].review_lsp_attempted = true
+  map_review_lsp(bufnr)
+  vim.diagnostic.enable(false, { bufnr = bufnr })
 
+  -- Root callbacks expect a real filename, not diffview://.../.git/SHA/path.
+  -- bufadd supplies that name without reading the file or triggering FileType.
+  local probe = vim.fn.bufadd(abs)
+  local function start(config, project_root)
+    if not vim.api.nvim_buf_is_valid(bufnr) or type(project_root) ~= 'string' then
+      return
+    end
+    config.root_dir = project_root
+    vim.lsp.start(config, { bufnr = bufnr }) -- Default reuse matches name AND root.
+  end
   for _, name_ in ipairs(enabled_lsp_names()) do
-    if vim.lsp.is_enabled(name_) then
+    if vim.lsp.is_enabled(name_) and not vim.tbl_contains(M.config.review_lsp_exclude, name_) then
       local config = vim.lsp.config[name_]
       if type(config) == 'table' and type(config.filetypes) == 'table' and vim.tbl_contains(config.filetypes, ft) then
         config = vim.deepcopy(config)
-        local markers = config.root_markers
-        if type(config.root_dir) == 'function' or not config.root_dir then
-          config.root_dir = (markers and vim.fs.root(abs, markers)) or vim.fs.root(abs, { '.git' })
-        end
-        if config.root_dir then
-          local id = vim.lsp.start(config, {
-            bufnr = bufnr,
-            reuse_client = function(client, cfg)
-              if client.name ~= cfg.name or client:is_stopped() then
-                return false
-              end
-              local client_root = client.root_dir or client.config.root_dir
-              return type(client_root) == 'string' and vim.startswith(abs, client_root)
-            end,
-          })
-          if id then
-            attached = true
-          end
+        if type(config.root_dir) == 'function' then
+          -- Respect callbacks that deliberately decline this project (e.g. Deno).
+          config.root_dir(probe, function(project_root)
+            start(config, project_root)
+          end)
+        else
+          local project_root = config.root_dir or (config.root_markers and vim.fs.root(abs, config.root_markers))
+          start(config, project_root)
         end
       end
     end
   end
+end
 
-  if attached then
-    vim.diagnostic.enable(false, { bufnr = bufnr })
-    map_review_lsp(bufnr)
+-- Diffview may open several buffers before hiding them behind the summary.
+-- Only start navigation servers for a diff the user actually stays on.
+function M.prepare_diff_lsp(bufnr)
+  if not vim.api.nvim_buf_is_valid(bufnr) or vim.bo[bufnr].buftype == '' then
+    return
   end
+  local lib = require 'diffview.lib'
+  local view = lib.get_current_view()
+  local sequence = (vim.b[bufnr].review_lsp_sequence or 0) + 1
+  vim.b[bufnr].review_lsp_sequence = sequence
+  vim.defer_fn(function()
+    if not vim.api.nvim_buf_is_valid(bufnr) or vim.b[bufnr].review_lsp_sequence ~= sequence then
+      return
+    end
+    if view ~= lib.get_current_view() or (view and view._pr_overview_pending) then
+      return
+    end
+    if #vim.fn.win_findbuf(bufnr) == 0 then
+      return
+    end
+    M.attach_diff_lsp(bufnr)
+  end, 150)
 end
 
 local function in_visual()
@@ -570,6 +611,7 @@ function M.open(pr)
       return
     end
     shown = true
+    view._pr_overview_pending = false
     local text = summary_error or render_info(summary)
     show_in_main(scratch_buf(('PR #%d'):format(pr.number), text, 'markdown'))
   end
@@ -612,6 +654,7 @@ function M.open(pr)
     end
     view = require('diffview.lib').get_current_view()
     if view and M.config.overview_on_open then
+      view._pr_overview_pending = true
       local function loaded()
         ready = true
         vim.schedule(overview)
@@ -626,6 +669,7 @@ function M.open(pr)
       view.emitter:on('file_open_pre', function()
         if ready then
           shown = true
+          view._pr_overview_pending = false
         end
       end)
       if view.initialized and view.cur_entry then
@@ -1667,13 +1711,5 @@ end, { nargs = 1, desc = 'Drop a queued review comment by index' })
 vim.api.nvim_create_user_command('PRClose', function()
   M.close_pr()
 end, { desc = 'Close the current PR, sending gn notes and queued comments' })
-
-vim.api.nvim_create_autocmd('User', {
-  pattern = 'DiffviewDiffBufRead',
-  group = vim.api.nvim_create_augroup('pr-review-diff-lsp', { clear = true }),
-  callback = function()
-    M.attach_diff_lsp(vim.api.nvim_get_current_buf())
-  end,
-})
 
 return M
