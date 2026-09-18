@@ -51,18 +51,6 @@ M._scratch = {}
 -- lives further down the file.
 local render_info
 
-local FIELDS = table.concat({
-  'number',
-  'title',
-  'author',
-  'baseRefName',
-  'headRefName',
-  'headRefOid',
-  'isDraft',
-  'url',
-  'reviewDecision',
-}, ',')
-
 ---------------------------------------------------------------------------
 -- Small helpers
 ---------------------------------------------------------------------------
@@ -590,7 +578,8 @@ end
 
 --- Fetch the PR head and its base branch, then diff head against the merge
 --- base. Nothing is checked out, so your working tree is untouched.
-function M.open(pr)
+function M.open(pr, opts)
+  opts = opts or {}
   local root = pr._root or git_root()
   if not root then
     notify('not inside a git repo', vim.log.levels.ERROR)
@@ -625,29 +614,23 @@ function M.open(pr)
     cancel_open_summary = review_data.summary(root, pr.number, function(err, data)
       summary_error, summary = err, data
       overview()
-    end)
+    end, opts.force)
   end
-  notify(('#%d fetching (%s -> %s)'):format(pr.number, pr.headRefName, base))
-  run({
-    'git',
-    'fetch',
-    '--no-tags',
-    '--no-recurse-submodules',
-    '--no-auto-maintenance',
-    remote,
-    ('+refs/pull/%d/head:%s'):format(pr.number, ref),
-    ('+refs/heads/%s:refs/remotes/%s/%s'):format(base, remote, base),
-  }, function(res)
+  local started = vim.uv.hrtime()
+  notify(('#%d opening…'):format(pr.number))
+  review_data.fetch(root, remote, pr, function(err, refs, cached)
     if generation ~= open_generation then
       return
     end
-    if res.code ~= 0 then
+    if err then
       if cancel_open_summary then
         cancel_open_summary()
       end
-      notify('fetch failed: ' .. (res.stderr or ''), vim.log.levels.ERROR)
+      notify(err, vim.log.levels.ERROR)
       return
     end
+    pr.headRefOid, pr.baseRefOid = refs.head, refs.base
+    M.last_open = { cached = cached, fetch_ms = (vim.uv.hrtime() - started) / 1e6 }
     if M.config.close_previous then
       close_previous(M.current and M.current.number)
     end
@@ -683,8 +666,15 @@ function M.open(pr)
       end
     end
     local pending = #load_queue(pr.number)
-    notify(('#%d %s%s'):format(pr.number, pr.title, pending > 0 and (' (%d comments still queued)'):format(pending) or ''))
-  end, { cwd = root })
+    notify(
+      ('#%d %s%s%s'):format(
+        pr.number,
+        pr.title,
+        cached and ' [cached; <leader>gR refreshes]' or '',
+        pending > 0 and (' (%d comments still queued)'):format(pending) or ''
+      )
+    )
+  end, opts.force)
 end
 
 ---------------------------------------------------------------------------
@@ -866,27 +856,12 @@ function M.pick(opts)
     search = search .. ' -review:approved'
   end
 
-  run({
-    'gh',
-    'pr',
-    'list',
-    '--state',
-    'open',
-    '--search',
-    search,
-    '--limit',
-    tostring(M.config.limit),
-    '--json',
-    FIELDS,
-  }, function(res)
-    if res.code ~= 0 then
-      notify('gh pr list failed: ' .. (res.stderr or ''), vim.log.levels.ERROR)
-      return
+  review_data.list(root, search, M.config.limit, function(err, prs, cached)
+    if err then
+      return notify(err, vim.log.levels.ERROR)
     end
-    local ok, prs = pcall(vim.json.decode, res.stdout)
-    if not ok or type(prs) ~= 'table' then
-      notify('could not parse gh output', vim.log.levels.ERROR)
-      return
+    if cached then
+      notify 'PR list from cache (up to 5 minutes old); :PRReview! refreshes'
     end
     if #prs == 0 then
       notify(scope == 'all' and 'no open PRs awaiting review' or 'no PRs awaiting your review')
@@ -895,12 +870,13 @@ function M.pick(opts)
       pr._root = root
     end
     M.show_picker(prs, base_filter, scope)
-  end, { cwd = root })
+  end, opts.force)
 end
 
 --- Open any PR by number, whether or not it is assigned to you. Accepts
 --- "1284", "#1284", or a full pull-request URL.
-function M.open_number(arg)
+function M.open_number(arg, opts)
+  opts = opts or {}
   if not have_gh() then
     return
   end
@@ -927,7 +903,7 @@ function M.open_number(arg)
       return
     end
 
-    local root = git_root()
+    local root = opts.root or git_root()
     if not root then
       return notify('not inside a git repo', vim.log.levels.ERROR)
     end
@@ -937,22 +913,16 @@ function M.open_number(arg)
       cancel_open_summary()
     end
     notify('loading #' .. number .. '...')
-    run({ 'gh', 'pr', 'view', number, '--json', FIELDS }, function(res)
+    review_data.metadata(root, number, function(err, pr)
       if generation ~= open_generation then
         return
       end
-      if res.code ~= 0 then
-        notify(('could not load #%s: %s'):format(number, res.stderr or ''), vim.log.levels.ERROR)
-        return
-      end
-      local ok, pr = pcall(vim.json.decode, res.stdout)
-      if not ok or type(pr) ~= 'table' or not pr.number then
-        notify('could not parse gh output', vim.log.levels.ERROR)
-        return
+      if err then
+        return notify(err, vim.log.levels.ERROR)
       end
       pr._root = root
-      M.open(pr)
-    end, { cwd = root })
+      M.open(pr, opts)
+    end, opts.force)
   end
 
   if arg and arg ~= '' then
@@ -1666,11 +1636,11 @@ end
 map('<leader>gr', M.pick, 'Review: pick a PR')
 map('<leader>gR', function()
   if M.current then
-    M.open(M.current)
+    M.open_number(tostring(M.current.number), { force = true, root = M.current._root })
   else
     M.pick()
   end
-end, 'Review: reopen current PR diff')
+end, 'Review: refresh current PR from GitHub')
 map('<leader>gi', function()
   M.info()
 end, 'Review: PR description + comments')
@@ -1710,13 +1680,13 @@ end, 'Previous git hunk')
 
 vim.api.nvim_create_user_command('PRReview', function(opts)
   if opts.args == 'all' then
-    M.pick { scope = 'all' }
+    M.pick { scope = 'all', force = opts.bang }
   elseif opts.args and opts.args ~= '' then
-    M.open_number(opts.args)
+    M.open_number(opts.args, { force = opts.bang })
   else
-    M.pick()
+    M.pick { force = opts.bang }
   end
-end, { nargs = '?', desc = 'Review a PR: pick from your queue, all open PRs, or a number/url' })
+end, { bang = true, nargs = '?', desc = 'Review a PR: pick from your queue, all open PRs, or a number/url' })
 
 vim.api.nvim_create_user_command('PRUncomment', function(opts)
   M.unqueue(opts.args)

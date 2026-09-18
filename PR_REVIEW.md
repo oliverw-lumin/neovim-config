@@ -1,14 +1,21 @@
 # PR review performance
 
-`<leader>gr` opens the picker; `<leader>gN` opens a PR by number. Opening a PR
-fetches its head and target branch, with the summary request running in parallel.
-Fetches skip tags, submodules, and automatic maintenance. Branch freshness and
-the merge-base diff are preserved on every open, including reopen.
+`<leader>gr` opens the picker; `<leader>gN` opens a PR by number. The PR
+list, metadata, summaries, and fetched refs are cached per repository on disk
+for five minutes, including across Neovim restarts. Cold opens fetch the head
+and target branch while loading the summary in parallel. Fetches skip tags,
+submodules, and automatic maintenance.
 
-Summaries are cached per repository and PR for 60 seconds. The picker and review
-share cached and in-flight requests. Fast scrolling waits 120 ms before making a
-request and cancels abandoned previews. `<leader>gi` explicitly refreshes the
-summary, including comments and reviews.
+Warm opens validate the local head and base refs before skipping the network
+fetch. Missing or changed refs, a different target branch, or newly known head
+or base SHAs trigger a fetch. Cached results may be up to five minutes old.
+Use `:PRReview!` to refresh the list, `:PRReview! 123` to refresh a numbered PR,
+or `<leader>gR` to refresh the current PR's metadata, refs, and summary.
+`<leader>gi` refreshes just the summary, comments, and reviews.
+
+The picker and review share cached and in-flight requests. Fast scrolling waits
+120 ms before making a request and cancels abandoned previews. Cache write
+failures do not prevent reviews, and failed requests are never cached.
 
 Diff language servers start after a buffer stays visible for 150 ms. Buffers
 hidden behind the overview do not start servers. Review buffers use the normal

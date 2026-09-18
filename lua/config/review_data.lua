@@ -1,7 +1,19 @@
--- Shared PR summaries. Requests belong to a repository, not the current tab.
-local M = {}
+-- Repository-scoped caches survive :qa. Only successful responses are stored.
+local M = { cache_dir = vim.fn.stdpath 'cache' .. '/pr-review-v2' }
 local cache, pending = {}, {}
-local fields = table.concat({
+M.fields = table.concat({
+  'number',
+  'title',
+  'author',
+  'baseRefName',
+  'baseRefOid',
+  'headRefName',
+  'headRefOid',
+  'isDraft',
+  'url',
+  'reviewDecision',
+}, ',')
+local summary_fields = table.concat({
   'number',
   'title',
   'state',
@@ -19,46 +31,73 @@ local fields = table.concat({
   'comments',
   'reviews',
 }, ',')
-
-function M.summary(root, number, callback, force)
-  local key = root .. '\0' .. number
-  local hit = cache[key]
-  if not force and hit and vim.uv.now() - hit.time < 60000 then
-    callback(nil, hit.data)
+local function key_for(root, kind, id)
+  return vim.fn.sha256(root .. '\0' .. kind .. '\0' .. tostring(id))
+end
+local function read(key, ttl)
+  local entry = cache[key]
+  if not entry then
+    local ok, lines = pcall(vim.fn.readfile, M.cache_dir .. '/' .. key .. '.json')
+    if ok then
+      local decoded, value = pcall(vim.json.decode, table.concat(lines, '\n'))
+      if decoded and type(value) == 'table' then
+        entry = value
+      end
+    end
+    cache[key] = entry
+  end
+  if entry and type(entry.time) == 'number' and os.time() >= entry.time and os.time() - entry.time < ttl then
+    return entry.data
+  end
+end
+local function write(key, data)
+  local entry = { time = os.time(), data = data }
+  cache[key] = entry
+  -- Cache I/O failure should never stop a review. Rename prevents partial reads
+  -- when two Neovim processes are reviewing the same repository.
+  pcall(function()
+    vim.fn.mkdir(M.cache_dir, 'p', '0700')
+    local path = M.cache_dir .. '/' .. key .. '.json'
+    local temporary = path .. '.' .. vim.fn.getpid() .. '.tmp'
+    vim.fn.writefile({ vim.json.encode(entry) }, temporary)
+    vim.uv.fs_rename(temporary, path)
+  end)
+end
+local function request(root, kind, id, cmd, ttl, validate, callback, force)
+  local key = key_for(root, kind, id)
+  local hit = not force and read(key, ttl)
+  if hit and validate(hit) then
+    callback(nil, vim.deepcopy(hit), true)
     return function() end
   end
-  local request = pending[key]
+  local job = pending[key]
   local listener = { callback = callback }
-  if request then
-    table.insert(request.listeners, listener)
+  if job then
+    table.insert(job.listeners, listener)
   else
-    request = { listeners = { listener } }
-    pending[key] = request
-    request.job = vim.system({ 'gh', 'pr', 'view', tostring(number), '--json', fields }, {
-      text = true,
-      cwd = root,
-      timeout = 30000,
-    }, function(result)
+    job = { listeners = { listener } }
+    pending[key] = job
+    job.process = vim.system(cmd, { cwd = root, text = true, timeout = 30000 }, function(result)
       vim.schedule(function()
-        if pending[key] ~= request then
+        if pending[key] ~= job then
           return
         end
         pending[key] = nil
         local err, data
         if result.code ~= 0 then
-          err = 'gh pr view failed: ' .. (result.stderr or '')
+          err = 'gh ' .. kind .. ' failed: ' .. (result.stderr or '')
         else
           local ok, decoded = pcall(vim.json.decode, result.stdout)
-          if ok and type(decoded) == 'table' and decoded.number == tonumber(number) then
+          if ok and validate(decoded) then
             data = decoded
-            cache[key] = { data = data, time = vim.uv.now() }
+            write(key, data)
           else
             err = 'could not parse gh output'
           end
         end
-        for _, item in ipairs(request.listeners) do
+        for _, item in ipairs(job.listeners) do
           if item.callback then
-            item.callback(err, data)
+            item.callback(err, vim.deepcopy(data), false)
           end
         end
       end)
@@ -66,20 +105,139 @@ function M.summary(root, number, callback, force)
   end
   return function()
     listener.callback = nil
-    -- Allow picker -> open to adopt the request before cancelling it.
     vim.defer_fn(function()
-      if pending[key] ~= request then
+      if pending[key] ~= job then
         return
       end
-      for _, item in ipairs(request.listeners) do
+      for _, item in ipairs(job.listeners) do
         if item.callback then
           return
         end
       end
       pending[key] = nil
-      request.job:kill(15)
+      job.process:kill(15)
     end, 100)
   end
 end
+local function valid_pr(number)
+  return function(data)
+    return type(data) == 'table' and data.number == tonumber(number)
+  end
+end
+function M.summary(root, number, callback, force)
+  return request(root, 'summary', number, { 'gh', 'pr', 'view', tostring(number), '--json', summary_fields }, 300, valid_pr(number), callback, force)
+end
+function M.metadata(root, number, callback, force)
+  return request(root, 'metadata', number, { 'gh', 'pr', 'view', tostring(number), '--json', M.fields }, 300, valid_pr(number), callback, force)
+end
+function M.list(root, search, limit, callback, force)
+  return request(
+    root,
+    'list',
+    search .. '\0' .. limit,
+    {
+      'gh',
+      'pr',
+      'list',
+      '--state',
+      'open',
+      '--search',
+      search,
+      '--limit',
+      tostring(limit),
+      '--json',
+      M.fields,
+    },
+    300,
+    function(data)
+      if type(data) ~= 'table' or not vim.islist(data) then
+        return false
+      end
+      for _, pr in ipairs(data) do
+        if type(pr) ~= 'table' or not pr.number then
+          return false
+        end
+      end
+      return true
+    end,
+    callback,
+    force
+  )
+end
 
+-- A cache hit must also match the actual local refs. Deleting/changing refs,
+-- changing the PR's target branch, or a new head/base SHA bypasses the cache.
+local fetching = {}
+function M.fetch(root, remote, pr, callback, force)
+  local ref = ('refs/pr/%d'):format(pr.number)
+  local base = ('refs/remotes/%s/%s'):format(remote, pr.baseRefName)
+  local key = key_for(root, 'fetch', remote .. '\0' .. pr.number .. '\0' .. pr.baseRefName)
+  local active = fetching[key]
+  if active then
+    table.insert(active.listeners, callback)
+    active.force = active.force or force or pr.headRefOid ~= active.head or pr.baseRefOid ~= active.base
+    return
+  end
+  local job = { listeners = { callback }, force = force, head = pr.headRefOid, base = pr.baseRefOid }
+  fetching[key] = job
+  local function complete(err, refs, cached)
+    local listeners = fetching[key].listeners
+    fetching[key] = nil
+    for _, listener in ipairs(listeners) do
+      listener(err, refs, cached)
+    end
+  end
+  local function refs(done)
+    vim.system({ 'git', 'rev-parse', ref, base }, { cwd = root, text = true }, function(result)
+      vim.schedule(function()
+        local values = vim.split(result.stdout or '', '\n', { trimempty = true })
+        if result.code ~= 0 or #values ~= 2 or not values[1]:match '^%x+$' or not values[2]:match '^%x+$' then
+          return done(nil)
+        end
+        done { head = values[1], base = values[2] }
+      end)
+    end)
+  end
+  local function fetch()
+    vim.system({
+      'git',
+      'fetch',
+      '--no-tags',
+      '--no-recurse-submodules',
+      '--no-auto-maintenance',
+      remote,
+      ('+refs/pull/%d/head:%s'):format(pr.number, ref),
+      ('+refs/heads/%s:%s'):format(pr.baseRefName, base),
+    }, { cwd = root, text = true, timeout = 60000 }, function(result)
+      vim.schedule(function()
+        if result.code ~= 0 then
+          return complete('fetch failed: ' .. (result.stderr or ''), nil, false)
+        end
+        refs(function(actual)
+          if not actual then
+            return complete('fetched PR refs could not be resolved', nil, false)
+          end
+          actual.requested_head, actual.requested_base = pr.headRefOid, pr.baseRefOid
+          write(key, actual)
+          complete(nil, actual, false)
+        end)
+      end)
+    end)
+  end
+  local hit = not force and read(key, 300)
+  if
+    type(hit) ~= 'table'
+    or (pr.headRefOid and pr.headRefOid ~= hit.head and pr.headRefOid ~= hit.requested_head)
+    or (pr.baseRefOid and pr.baseRefOid ~= hit.base and pr.baseRefOid ~= hit.requested_base)
+  then
+    return fetch()
+  end
+  refs(function(actual)
+    if not job.force and actual and actual.head == hit.head and actual.base == hit.base then
+      complete(nil, actual, true)
+    else
+      fetch()
+    end
+  end)
+end
 return M

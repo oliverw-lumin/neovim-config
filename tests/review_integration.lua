@@ -1,7 +1,11 @@
 -- Run with the real config from a local fixture checkout. See tests/README.md.
 local counts, messages = {}, {}
+local fetch_count = 0
 local original_system = vim.system
 vim.system = function(cmd, opts, callback)
+  if cmd[1] == 'git' and cmd[2] == 'fetch' then
+    fetch_count = fetch_count + 1
+  end
   if cmd[1] ~= 'gh' then
     return original_system(cmd, opts, callback)
   end
@@ -80,6 +84,7 @@ vim.defer_fn(function()
       'reopen summary'
     )
     assert(counts[1] == 1, 'reopen should reuse summary')
+    assert(fetch_count == 2 and review.last_open.cached, 'reopening must not repeat network fetch')
     review.info()
     assert(
       vim.wait(2000, function()
@@ -129,6 +134,34 @@ vim.defer_fn(function()
       'picker selection opens review'
     )
     assert(counts[1] == before_picker, 'picker-to-open must reuse summary without another request')
+    local before_refresh = fetch_count
+    review.open(pr(1), { force = true })
+    assert(
+      vim.wait(2000, function()
+        return fetch_count == before_refresh + 1 and not review.last_open.cached
+      end),
+      'force must fetch fresh refs'
+    )
+    assert(
+      vim.wait(2000, function()
+        return summary_visible(1)
+      end),
+      'refreshed summary'
+    )
+    vim.fn.system { 'git', 'update-ref', '-d', 'refs/pr/1' }
+    review.open(pr(1))
+    assert(
+      vim.wait(2000, function()
+        return fetch_count == before_refresh + 2
+      end),
+      'missing local refs must invalidate cache'
+    )
+    assert(
+      vim.wait(2000, function()
+        return summary_visible(1)
+      end),
+      'missing refs recovered'
+    )
     vim.fn.writefile(
       { ('PASS populated %.1fms; empty %.1fms; navigation, cache, refresh, latest-open, metadata race, Telescope handoff'):format(first_ms, empty_ms) },
       vim.env.REVIEW_TEST_RESULT

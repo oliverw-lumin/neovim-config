@@ -9,6 +9,7 @@ vim.system = function(cmd, opts, callback)
   return job
 end
 local data = require 'config.review_data'
+data.cache_dir = vim.fn.tempname()
 local function finish(job, result)
   job.callback(result or { code = 0, stdout = '{"number":7,"title":"example"}' })
   vim.wait(20, function()
@@ -62,5 +63,64 @@ data.summary('/error', 7, failure)
 assert(#jobs == 7, 'errors must not be cached')
 finish(jobs[7], { code = 0, stdout = 'bad json' })
 assert(failed == 'could not parse gh output')
-print 'PASS review summary cache, sharing, cancellation, handoff, refresh, errors'
+-- Reloading the module simulates a fresh Neovim process reading the disk cache.
+local directory = data.cache_dir
+package.loaded['config.review_data'] = nil
+local restarted = require 'config.review_data'
+restarted.cache_dir = directory
+local previous = #jobs
+restarted.summary('/one', 7, receive)
+assert(#jobs == previous, 'summary cache must survive restart')
+local list_calls = 0
+restarted.list('/one', 'review:required', 100, function(err, prs)
+  assert(not err and #prs == 1)
+  list_calls = list_calls + 1
+end)
+finish(jobs[#jobs], { code = 0, stdout = '[{"number":7}]' })
+local after_list = #jobs
+restarted.list('/one', 'review:required', 100, function(err, prs, hit)
+  assert(not err and #prs == 1 and hit)
+  list_calls = list_calls + 1
+end)
+assert(#jobs == after_list and list_calls == 2, 'repeat list must not launch gh')
+restarted.list('/one', 'review:required', 100, function() end, true)
+assert(#jobs == after_list + 1, 'forced list refresh bypasses cache')
+finish(jobs[#jobs], { code = 0, stdout = '[]' })
+package.loaded['config.review_data'] = nil
+local fresh = require 'config.review_data'
+fresh.cache_dir = directory
+fresh.list('/one', 'review:required', 100, function(err, prs, hit)
+  assert(not err and #prs == 0 and hit, 'empty list must survive restart')
+end)
+assert(#jobs == after_list + 1, 'restart must read list from disk')
+local now = os.time
+os.time = function()
+  return now() + 301
+end
+fresh.list('/one', 'review:required', 100, function() end)
+assert(#jobs == after_list + 2, 'expired list must request fresh data')
+os.time = now
+finish(jobs[#jobs], { code = 0, stdout = '[]' })
+local pr = { number = 7, baseRefName = 'main', headRefOid = 'aaaa', baseRefOid = 'bbbb' }
+local fetched
+fresh.fetch('/one', 'origin', pr, function(err, refs, hit)
+  assert(not err and not hit)
+  fetched = refs
+end)
+finish(jobs[#jobs], { code = 0, stdout = '' })
+finish(jobs[#jobs], { code = 0, stdout = 'aaaa\ncccc\n' })
+assert(fetched and fetched.base == 'cccc')
+local fetched_jobs = #jobs
+fresh.fetch('/one', 'origin', pr, function(err, refs, hit)
+  assert(not err and hit and refs.base == 'cccc', 'old advertised base must reuse fetched tip')
+end)
+assert(jobs[#jobs].cmd[2] == 'rev-parse')
+finish(jobs[#jobs], { code = 0, stdout = 'aaaa\ncccc\n' })
+assert(#jobs == fetched_jobs + 1, 'same advertised base must not repeatedly fetch')
+pr.headRefOid = 'dddd'
+fresh.fetch('/one', 'origin', pr, function() end)
+assert(jobs[#jobs].cmd[2] == 'fetch', 'new advertised head must fetch')
+finish(jobs[#jobs], { code = 1, stderr = 'offline' })
+vim.fn.delete(directory, 'rf')
+print 'PASS persistent summaries and list cache, sharing, cancellation, handoff, refresh, errors'
 vim.cmd 'qa!'
