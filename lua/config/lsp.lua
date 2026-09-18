@@ -120,7 +120,8 @@ function M.setup()
     local config = vim.lsp.config[name]
     local root_dir, markers, required = config.root_dir, config.root_markers, config.workspace_required
     vim.lsp.config(name, {
-      capabilities = capabilities,
+      capabilities = name == 'clangd' and vim.tbl_deep_extend('force', capabilities, { general = { positionEncodings = { 'utf-8', 'utf-16' } } })
+        or capabilities,
       root_dir = function(buf, on_dir)
         if require('config.buffer').large(buf) then
           return

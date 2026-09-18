@@ -13,6 +13,7 @@ assert(not package.loaded.conform, 'formatting must not load before first use/sa
 assert(not package.loaded['telescope.builtin'], 'Telescope must not load on startup')
 lazy.load { plugins = { 'nvim-lspconfig' } }
 assert(not package.loaded['telescope.builtin'], 'LSP setup must not eagerly load Telescope')
+assert(vim.deep_equal(vim.lsp.config.clangd.capabilities.general.positionEncodings, { 'utf-8', 'utf-16' }), 'preserve upstream Clangd encoding negotiation')
 assert(vim.lsp.is_enabled 'gopls' and vim.lsp.is_enabled 'biome', 'server setup must not depend on VeryLazy')
 local original_get = vim.lsp.get_client_by_id
 local original_clients = vim.lsp.get_clients
