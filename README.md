@@ -42,7 +42,6 @@ Leader is **Space**. Which-key shows groups as you type.
 The previous `b`/`B`, `yp`, and `c` mappings moved to `bb`/`bB`, `Y`, and `xc` so
 an operator/action no longer doubles as a longer mapping's prefix.
 
-See [PR_REVIEW.md](PR_REVIEW.md) for the PR picker, review and import workflow.
 
 ## Performance and project behaviour
 
