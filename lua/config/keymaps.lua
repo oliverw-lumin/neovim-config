@@ -1,6 +1,8 @@
 vim.keymap.set('n', '<Esc>', '<cmd>nohlsearch<CR>')
 vim.keymap.set('n', '<leader>q', vim.diagnostic.setloclist, { desc = 'Open buffer diagnostic location list' })
-vim.keymap.set('n', '<leader>Q', vim.diagnostic.setqflist, { desc = 'Open diagnostic qflist' })
+vim.keymap.set('n', '<leader>Q', function()
+  vim.diagnostic.open_float { border = 'rounded', source = 'if_many' }
+end, { desc = 'Show diagnostic float' })
 vim.keymap.set('t', '<Esc><Esc>', '<C-\\><C-n>', { desc = 'Exit terminal mode' })
 
 vim.keymap.set('n', '<C-h>', '<C-w><C-h>', { desc = 'Move focus to left window' })

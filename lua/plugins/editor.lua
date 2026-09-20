@@ -103,20 +103,6 @@ return {
   },
 
   {
-    'lukas-reineke/indent-blankline.nvim',
-    main = 'ibl',
-    event = { 'BufReadPost', 'BufNewFile' },
-    opts = {},
-    config = function(_, opts)
-      require('ibl').setup(opts)
-      local hooks = require 'ibl.hooks'
-      hooks.register(hooks.type.ACTIVE, function(buf)
-        return not require('config.buffer').large(buf)
-      end)
-    end,
-  },
-
-  {
     'windwp/nvim-autopairs',
     event = 'InsertEnter',
     opts = {},
