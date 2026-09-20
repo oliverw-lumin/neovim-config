@@ -35,7 +35,7 @@ vim.api.nvim_create_autocmd({ 'BufEnter', 'FocusGained', 'InsertLeave', 'WinEnte
   group = numbergroup,
   callback = function()
     if vim.opt.number:get() and vim.api.nvim_get_mode().mode ~= 'i' then
-      vim.opt.relativenumber = true
+      vim.opt_local.relativenumber = true
     end
   end,
 })
@@ -44,7 +44,39 @@ vim.api.nvim_create_autocmd({ 'BufLeave', 'FocusLost', 'InsertEnter', 'WinLeave'
   group = numbergroup,
   callback = function()
     if vim.opt.number:get() then
-      vim.opt.relativenumber = false
+      vim.opt_local.relativenumber = false
+    end
+  end,
+})
+
+-- Quickfix and location lists own their buffers; update the list API only.
+vim.api.nvim_create_autocmd('FileType', {
+  pattern = 'qf',
+  group = vim.api.nvim_create_augroup('quickfix-edit', { clear = true }),
+  callback = function(event)
+    vim.keymap.set('n', 'dd', function()
+      local idx = vim.fn.line '.'
+      local location = vim.fn.getwininfo(vim.api.nvim_get_current_win())[1].loclist == 1
+      local list = location and vim.fn.getloclist(0) or vim.fn.getqflist()
+      if idx > #list then
+        return
+      end
+      table.remove(list, idx)
+      local info = { items = list, idx = math.min(idx, #list) }
+      if location then
+        vim.fn.setloclist(0, {}, 'r', info)
+      else
+        vim.fn.setqflist({}, 'r', info)
+      end
+    end, { buffer = event.buf, desc = 'Delete list entry' })
+  end,
+})
+
+vim.api.nvim_create_autocmd('FileType', {
+  group = vim.api.nvim_create_augroup('indent-folding', { clear = true }),
+  callback = function(event)
+    if vim.bo[event.buf].buftype == '' then
+      vim.opt_local.foldmethod = require('config.buffer').large(event.buf) and 'manual' or 'indent'
     end
   end,
 })

@@ -71,12 +71,17 @@ return {
         'vimdoc',
         'yaml',
       }
-      require('nvim-treesitter').install(langs)
+      vim.api.nvim_create_user_command('TSInstallCommon', function()
+        require('nvim-treesitter').install(langs)
+      end, { desc = 'Install the configured Treesitter parsers' })
       vim.api.nvim_create_autocmd('FileType', {
         group = vim.api.nvim_create_augroup('treesitter-start', { clear = true }),
         callback = function(event)
+          if require('config.buffer').large(event.buf) then
+            return
+          end
           local ok = pcall(vim.treesitter.start, event.buf)
-          if ok and vim.bo[event.buf].filetype ~= 'ruby' then
+          if ok and vim.bo[event.buf].buftype == '' then
             vim.bo[event.buf].indentexpr = "v:lua.require'nvim-treesitter'.indentexpr()"
           end
         end,
@@ -100,7 +105,15 @@ return {
   {
     'lukas-reineke/indent-blankline.nvim',
     main = 'ibl',
+    event = { 'BufReadPost', 'BufNewFile' },
     opts = {},
+    config = function(_, opts)
+      require('ibl').setup(opts)
+      local hooks = require 'ibl.hooks'
+      hooks.register(hooks.type.ACTIVE, function(buf)
+        return not require('config.buffer').large(buf)
+      end)
+    end,
   },
 
   {
@@ -141,10 +154,6 @@ return {
     },
     config = function(_, opts)
       require('render-markdown').setup(opts)
-      require('render-markdown.core.colors').init()
-      require('render-markdown.core.command').init()
-      require('render-markdown.core.log').init()
-      require('render-markdown.core.manager').init()
       vim.api.nvim_set_hl(0, 'RenderMarkdownCodeInline', {})
       vim.api.nvim_set_hl(0, 'RenderMarkdownCode', { bg = '#121212' })
     end,

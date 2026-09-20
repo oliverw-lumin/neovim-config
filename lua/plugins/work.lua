@@ -2,8 +2,10 @@
 return {
   {
     'WhoIsSethDaniel/mason-tool-installer.nvim',
+    cmd = { 'MasonToolsInstall', 'MasonToolsUpdate', 'MasonToolsClean' },
     dependencies = { 'mason-org/mason.nvim' },
     opts = {
+      run_on_start = false,
       ensure_installed = {
         'lua-language-server',
         'typescript-language-server',
@@ -29,6 +31,10 @@ return {
         'staticcheck',
         'selene',
         'yamllint',
+        'clang-format',
+        'cppcheck',
+        'debugpy',
+        'delve',
       },
     },
   },

@@ -2,7 +2,7 @@ return {
   {
     'nvim-telescope/telescope.nvim',
     commit = '5255aa2',
-    event = 'VimEnter',
+    cmd = 'Telescope',
     dependencies = {
       'nvim-lua/plenary.nvim',
       {
@@ -22,10 +22,14 @@ return {
         },
         defaults = {
           vimgrep_arguments = {
-            'rg', '--no-heading', '--with-filename',
-            '--line-number', '--column', '--case-sensitive',
+            'rg',
+            '--no-heading',
+            '--with-filename',
+            '--line-number',
+            '--column',
+            '--smart-case',
           },
-          file_ignore_patterns = { 'node_modules', '.git', 'dist', 'build', 'target' },
+          file_ignore_patterns = { '^node_modules/', '/node_modules/', '^%.git/', '/%.git/', '^dist/', '/dist/', '^build/', '/build/', '^target/', '/target/' },
           mappings = {
             i = {
               ['<C-j>'] = 'move_selection_next',
@@ -60,11 +64,22 @@ return {
       icons = {
         mappings = vim.g.have_nerd_font,
         keys = vim.g.have_nerd_font and {} or {
-          Up = '<Up> ', Down = '<Down> ', Left = '<Left> ', Right = '<Right> ',
-          C = '<C-…> ', M = '<M-…> ', D = '<D-…> ', S = '<S-…> ',
-          CR = '<CR> ', Esc = '<Esc> ', ScrollWheelDown = '<ScrollWheelDown> ',
-          ScrollWheelUp = '<ScrollWheelUp> ', NL = '<NL> ', BS = '<BS> ',
-          Space = '<Space> ', Tab = '<Tab> ',
+          Up = '<Up> ',
+          Down = '<Down> ',
+          Left = '<Left> ',
+          Right = '<Right> ',
+          C = '<C-…> ',
+          M = '<M-…> ',
+          D = '<D-…> ',
+          S = '<S-…> ',
+          CR = '<CR> ',
+          Esc = '<Esc> ',
+          ScrollWheelDown = '<ScrollWheelDown> ',
+          ScrollWheelUp = '<ScrollWheelUp> ',
+          NL = '<NL> ',
+          BS = '<BS> ',
+          Space = '<Space> ',
+          Tab = '<Tab> ',
         },
       },
       spec = {
@@ -133,16 +148,37 @@ return {
     },
     config = function(_, opts)
       require('oil').setup(opts)
-      if vim.fn.argc() == 0 then
-        vim.defer_fn(function()
-          vim.cmd ':Oil'
-        end, 100)
-      end
+      local stdin = false
+      vim.api.nvim_create_autocmd('StdinReadPre', {
+        once = true,
+        callback = function()
+          stdin = true
+        end,
+      })
+      vim.api.nvim_create_autocmd('VimEnter', {
+        once = true,
+        callback = function()
+          vim.schedule(function()
+            if
+              not stdin
+              and vim.fn.argc() == 0
+              and vim.bo.buftype == ''
+              and not vim.bo.modified
+              and vim.api.nvim_buf_get_name(0) == ''
+              and vim.api.nvim_buf_line_count(0) == 1
+              and vim.api.nvim_buf_get_lines(0, 0, 1, false)[1] == ''
+            then
+              require('oil').open()
+            end
+          end)
+        end,
+      })
     end,
   },
 
   {
     'folke/zen-mode.nvim',
+    cmd = 'ZenMode',
     opts = {
       window = {
         width = 120,
@@ -187,7 +223,9 @@ return {
           {
             function()
               local reg = vim.fn.reg_recording()
-              if reg == '' then return '' end
+              if reg == '' then
+                return ''
+              end
               return 'recording @' .. reg
             end,
             color = { fg = '#D4877A' },
@@ -228,12 +266,20 @@ return {
       },
     },
     keys = {
-      { '<S-Enter>', function() require('noice').redirect(vim.fn.getcmdline()) end, mode = 'c', desc = 'Redirect cmdline' },
+      {
+        '<S-Enter>',
+        function()
+          require('noice').redirect(vim.fn.getcmdline())
+        end,
+        mode = 'c',
+        desc = 'Redirect cmdline',
+      },
     },
   },
 
   {
     'rcarriga/nvim-notify',
+    lazy = true,
     opts = {
       stages = 'fade',
       timeout = 2000,
@@ -248,6 +294,35 @@ return {
       { '<leader>gd', '<Cmd>DiffviewOpen<CR>', desc = 'Diff view' },
       { '<leader>gh', '<Cmd>DiffviewFileHistory<CR>', desc = 'File history' },
     },
+    opts = function()
+      local actions = require 'diffview.actions'
+      return {
+        hooks = {
+          diff_buf_win_enter = function(bufnr)
+            require('config.review').prepare_diff_lsp(bufnr)
+          end,
+        },
+        file_panel = {
+          win_config = {
+            win_opts = {
+              number = true,
+              relativenumber = true,
+            },
+          },
+        },
+        keymaps = {
+          -- L is <S-l>, which we use to move focus to the right window.
+          file_panel = {
+            { 'n', 'L', false },
+            { 'n', 'gL', actions.open_commit_log, { desc = 'Open the commit log panel' } },
+          },
+          file_history_panel = {
+            { 'n', 'L', false },
+            { 'n', 'gL', actions.open_commit_log, { desc = 'Show commit details' } },
+          },
+        },
+      }
+    end,
   },
 
   {

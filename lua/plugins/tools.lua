@@ -9,133 +9,58 @@ return {
       'leoluz/nvim-dap-go',
     },
     keys = {
-      { '<F5>', function() require('dap').continue() end, desc = 'Debug start/continue' },
-      { '<F1>', function() require('dap').step_into() end, desc = 'Debug step into' },
-      { '<F2>', function() require('dap').step_over() end, desc = 'Debug step over' },
-      { '<F3>', function() require('dap').step_out() end, desc = 'Debug step out' },
-      { '<leader>b', function() require('dap').toggle_breakpoint() end, desc = 'Toggle breakpoint' },
-      { '<leader>B', function() require('dap').set_breakpoint(vim.fn.input 'Breakpoint condition: ') end, desc = 'Set breakpoint' },
-      { '<F7>', function() require('dapui').toggle() end, desc = 'Debug UI' },
+      {
+        '<F5>',
+        function()
+          require('dap').continue()
+        end,
+        desc = 'Debug start/continue',
+      },
+      {
+        '<F1>',
+        function()
+          require('dap').step_into()
+        end,
+        desc = 'Debug step into',
+      },
+      {
+        '<F2>',
+        function()
+          require('dap').step_over()
+        end,
+        desc = 'Debug step over',
+      },
+      {
+        '<F3>',
+        function()
+          require('dap').step_out()
+        end,
+        desc = 'Debug step out',
+      },
+      {
+        '<leader>bb',
+        function()
+          require('dap').toggle_breakpoint()
+        end,
+        desc = 'Toggle breakpoint',
+      },
+      {
+        '<leader>bB',
+        function()
+          require('dap').set_breakpoint(vim.fn.input 'Breakpoint condition: ')
+        end,
+        desc = 'Set breakpoint',
+      },
+      {
+        '<F7>',
+        function()
+          require('dapui').toggle()
+        end,
+        desc = 'Debug UI',
+      },
     },
     config = function()
-      local dap = require 'dap'
-      local dapui = require 'dapui'
-
-      require('mason-nvim-dap').setup {
-        automatic_installation = true,
-        handlers = {},
-        ensure_installed = { 'delve', 'debugpy' },
-      }
-
-      local lldb_path = nil
-      local candidates = {
-        'lldb-dap', 'lldb-dap-22', 'lldb-dap-21', 'lldb-dap-20',
-        'lldb-dap-19', 'lldb-dap-18', 'lldb-vscode',
-      }
-      for _, bin in ipairs(candidates) do
-        local path = vim.fn.exepath(bin)
-        if path and path ~= '' then
-          lldb_path = path
-          break
-        end
-      end
-      if not lldb_path then
-        vim.notify(
-          'lldb-dap not found. Install it via: sudo apt install lldb-19',
-          vim.log.levels.ERROR
-        )
-        return
-      end
-
-      dap.adapters.lldb = {
-        type = 'executable',
-        command = lldb_path,
-        name = 'lldb',
-      }
-      dap.adapters.cppdbg = dap.adapters.lldb
-      dap.configurations.cpp = {
-        {
-          name = 'Launch',
-          type = 'lldb',
-          request = 'launch',
-          program = function()
-            local cwd = vim.fn.getcwd()
-            local choices = { 'Select executable:', '1. Chess Engine', '2. Perft Tests' }
-            local selection = vim.fn.inputlist(choices)
-            if selection == 1 then
-              return cwd .. '/build/chess_engine'
-            elseif selection == 2 then
-              return cwd .. '/build/perft_tests'
-            else
-              return vim.fn.input('Path to executable: ', cwd .. '/', 'file')
-            end
-          end,
-          cwd = '${workspaceFolder}',
-          stopOnEntry = false,
-          args = {},
-          runInTerminal = true,
-        },
-      }
-      dap.configurations.c = dap.configurations.cpp
-
-      dap.adapters.python = {
-        type = 'executable',
-        command = vim.fn.exepath 'python3' or vim.fn.exepath 'python' or 'python3',
-        args = { '-m', 'debugpy.adapter' },
-      }
-      dap.configurations.python = {
-        {
-          type = 'python',
-          request = 'launch',
-          name = 'Launch file',
-          program = '${file}',
-          pythonPath = function()
-            return vim.fn.exepath 'python3' or vim.fn.exepath 'python' or 'python3'
-          end,
-        },
-        {
-          type = 'python',
-          request = 'launch',
-          name = 'Launch with args',
-          program = function()
-            return vim.fn.input('Path to script: ', vim.fn.getcwd() .. '/', 'file')
-          end,
-          pythonPath = function()
-            return vim.fn.exepath 'python3' or vim.fn.exepath 'python' or 'python3'
-          end,
-          args = function()
-            local args_str = vim.fn.input 'Arguments: '
-            return vim.split(args_str, ' ')
-          end,
-        },
-        {
-          type = 'python',
-          request = 'launch',
-          name = 'Django',
-          program = function()
-            local manage = vim.fn.findfile('manage.py', vim.fn.getcwd() .. ';')
-            if manage ~= '' then return manage end
-            return vim.fn.input('Path to manage.py: ', vim.fn.getcwd() .. '/', 'file')
-          end,
-          pythonPath = function()
-            return vim.fn.exepath 'python3' or vim.fn.exepath 'python' or 'python3'
-          end,
-          args = { 'runserver', '--noreload' },
-        },
-      }
-
-      dapui.setup {
-        icons = { expanded = '▾', collapsed = '▸', current_frame = '*' },
-        controls = {
-          icons = {
-            pause = '⏸', play = '▶', step_into = '⏎', step_over = '⏭',
-            step_out = '⏮', step_back = 'b', run_last = '▶▶', terminate = '⏹', disconnect = '⏏',
-          },
-        },
-      }
-
-      dap.listeners.after.event_initialized['dapui_config'] = dapui.open
-      require('dap-go').setup { delve = { detached = vim.fn.has 'win32' == 0 } }
+      require('config.dap').setup()
     end,
   },
 
@@ -143,103 +68,107 @@ return {
     'mfussenegger/nvim-lint',
     event = { 'BufReadPre', 'BufNewFile' },
     config = function()
-      local lint = require 'lint'
-
-      -- cppcheck operates per translation unit and can't see cross-TU usage.
-      -- Suppress checks that produce false positives in multi-file projects.
-      lint.linters.cppcheck.args = vim.list_extend(vim.deepcopy(lint.linters.cppcheck.args), {
-        '--suppress=unusedStructMember',
-      })
-
-      lint.linters_by_ft = {
-        python = { 'ruff' },
-        javascript = {},
-        typescript = {},
-        javascriptreact = {},
-        typescriptreact = {},
-        lua = { 'selene' },
-        c = { 'cppcheck' },
-        cpp = { 'cppcheck' },
-        go = { 'staticcheck' },
-        sh = { 'shellcheck' },
-        bash = { 'shellcheck' },
-        yaml = { 'yamllint' },
-        markdown = {},
-      }
-
-      local lint_augroup = vim.api.nvim_create_augroup('lint', { clear = true })
-      vim.api.nvim_create_autocmd({ 'BufEnter', 'BufWritePost', 'InsertLeave' }, {
-        group = lint_augroup,
-        callback = function()
-          if vim.bo.modifiable then
-            lint.try_lint()
-          end
-        end,
-      })
+      require('config.lint').setup()
     end,
   },
 
   {
     'Civitasv/cmake-tools.nvim',
     lazy = true,
-    init = function()
-      local loaded = false
-      local function check()
-        local cwd = vim.uv.cwd()
-        if vim.fn.filereadable(cwd .. '/CMakeLists.txt') == 1 then
-          require('lazy').load { plugins = { 'cmake-tools.nvim' } }
-          loaded = true
-        end
-      end
-      check()
-      vim.api.nvim_create_autocmd('DirChanged', {
-        callback = function()
-          if not loaded then check() end
+    cmd = {
+      'CMakeGenerate',
+      'CMakeBuild',
+      'CMakeRun',
+      'CMakeDebug',
+      'CMakeRunTest',
+      'CMakeSelectBuildType',
+      'CMakeSelectBuildTarget',
+      'CMakeSelectLaunchTarget',
+      'CMakeSelectCwd',
+      'CMakeSelectBuildDir',
+    },
+    keys = {
+      {
+        '<leader>cc',
+        function()
+          require('config.tasks').cmake 'CMakeGenerate'
         end,
-      })
-    end,
-    opts = {
-      cmake_build_directory = 'build',
-      cmake_generate_options = { '-DCMAKE_EXPORT_COMPILE_COMMANDS=1' },
-      cmake_build_args = { '-j', tostring(tonumber(vim.fn.system('nproc')) or 1) },
-      cmake_executor = { name = 'quickfix', opts = {} },
-      cmake_runner = { name = 'terminal' },
-      cmake_dap_configuration = {
-        name = 'cpp', type = 'lldb', request = 'launch',
-        stopOnEntry = false, runInTerminal = true, console = 'integratedTerminal',
+        desc = 'CMake configure',
+      },
+      {
+        '<leader>cg',
+        function()
+          require('config.tasks').cmake 'CMakeGenerate'
+        end,
+        desc = 'CMake generate',
+      },
+      {
+        '<leader>cb',
+        function()
+          require('config.tasks').cmake 'CMakeBuild'
+        end,
+        desc = 'CMake build',
+      },
+      {
+        '<leader>cr',
+        function()
+          require('config.tasks').cmake 'CMakeRun'
+        end,
+        desc = 'CMake run',
+      },
+      {
+        '<leader>cd',
+        function()
+          require('config.tasks').cmake 'CMakeDebug'
+        end,
+        desc = 'CMake debug',
+      },
+      {
+        '<leader>ct',
+        function()
+          require('config.tasks').cmake 'CMakeSelectBuildType'
+        end,
+        desc = 'Select build type',
+      },
+      {
+        '<leader>cs',
+        function()
+          require('config.tasks').cmake 'CMakeSelectBuildTarget'
+        end,
+        desc = 'Select build target',
+      },
+      {
+        '<leader>cT',
+        function()
+          require('config.tasks').cmake 'CMakeRunTest'
+        end,
+        desc = 'CMake tests',
+      },
+      {
+        '<leader>cl',
+        function()
+          require('config.tasks').cmake 'CMakeSelectLaunchTarget'
+        end,
+        desc = 'Select launch target',
       },
     },
-    config = function(_, opts)
-      require('cmake-tools').setup(opts)
-
-      vim.keymap.set('n', '<leader>cg', '<cmd>CMakeGenerate<cr>', { desc = 'CMake generate' })
-      vim.keymap.set('n', '<leader>cb', function()
-        vim.cmd 'wa'
-        vim.cmd 'CMakeBuild'
-      end, { desc = 'CMake build' })
-      vim.keymap.set('n', '<leader>cr', function()
-        vim.cmd 'wa'
-        vim.cmd 'CMakeRun'
-      end, { desc = 'CMake run' })
-      vim.keymap.set('n', '<leader>cd', function()
-        vim.cmd 'wa'
-        vim.cmd 'CMakeDebug'
-      end, { desc = 'CMake debug' })
-      vim.keymap.set('n', '<leader>ct', '<cmd>CMakeSelectBuildType<cr>', { desc = 'Select build type' })
-      vim.keymap.set('n', '<leader>cs', '<cmd>CMakeSelectBuildTarget<cr>', { desc = 'Select target' })
-      vim.keymap.set('n', '<leader>cT', function()
-        vim.cmd 'wa'
-        vim.cmd 'CMakeRunTest'
-      end, { desc = 'Run tests' })
-      vim.keymap.set('n', '<leader>cl', '<cmd>CMakeSelectLaunchTarget<cr>', { desc = 'Select launch target' })
-      vim.keymap.set('n', '<F5>', function()
-        if require('dap').session() then
-          require('dap').continue()
-        else
-          vim.cmd 'wa'
-          vim.cmd 'CMakeDebug'
-        end
-      end, { desc = 'Build & debug' })
+    opts = function()
+      return {
+        cmake_build_directory = 'build',
+        cmake_regenerate_on_save = false,
+        cmake_generate_options = { '-DCMAKE_EXPORT_COMPILE_COMMANDS=1' },
+        cmake_build_args = { '-j', tostring(require('config.tasks').jobs()) },
+        cmake_executor = { name = 'quickfix', opts = {} },
+        cmake_runner = { name = 'terminal' },
+        cmake_dap_configuration = {
+          name = 'cpp',
+          type = 'lldb',
+          request = 'launch',
+          stopOnEntry = false,
+          runInTerminal = true,
+          console = 'integratedTerminal',
+        },
+      }
     end,
   },
 }

@@ -3,15 +3,28 @@
 -- Pick a PR that is waiting on your review, diff it against the branch it
 -- actually targets (not your local HEAD), leave line comments, submit -- all
 -- in nvim. Requires the `gh` CLI, plus telescope + diffview.
+--
+-- Picker: <C-a> toggles the production-base filter, <C-o> switches between
+-- your review-requested queue and every open PR still awaiting a review.
+--
+-- Diffview commit blobs are buftype=nowrite + a diffview:// name, so Neovim
+-- will not auto-attach language servers. We attach them ourselves and present
+-- the blob as the real project file so gd/grd resolve against the PR text.
 
 local M = {}
+local review_data = require 'config.review_data'
+local open_generation = 0
+local cancel_open_summary
 
 M.config = {
   remote = 'origin',
   -- Only show PRs whose base is this branch. <C-a> in the picker toggles to
   -- every base. Set to nil to show everything by default.
   base_filter = 'production',
+  -- <C-o> in the picker switches between this (your queue) and all_search.
   search = 'review-requested:@me',
+  -- Open PRs that still need a review (anyone), not only ones assigned to you.
+  all_search = 'review:required -is:draft',
   limit = 100,
   notes_dir = vim.fn.stdpath 'state' .. '/pr-review',
   -- Comment authors to hide in the PR summary. Lua patterns matched
@@ -24,6 +37,8 @@ M.config = {
   close_previous = true,
   -- Leave out PRs that already carry an approving review decision.
   hide_approved = true,
+  -- Diff buffers need navigation, not a second lint/CSS indexing pipeline.
+  review_lsp_exclude = { 'biome', 'eslint', 'tailwindcss' },
 }
 
 -- The PR currently being reviewed, as returned by `gh pr list --json`.
@@ -32,46 +47,9 @@ M.current = nil
 -- Scratch buffers we created for the current PR, wiped when we move on.
 M._scratch = {}
 
--- Rendered summaries, keyed by PR number, so moving around the picker does not
--- re-run gh for a PR it already fetched. Cleared each time the picker opens.
-M._info_cache = {}
-
 -- Forward declaration: the picker previews what <leader>gi renders, but that
 -- lives further down the file.
 local render_info
-
-local FIELDS = table.concat({
-  'number',
-  'title',
-  'author',
-  'baseRefName',
-  'headRefName',
-  'headRefOid',
-  'isDraft',
-  'url',
-  'reviewDecision',
-}, ',')
-
--- `gh pr view --comments` prints the comments *instead of* the preview, so the
--- description is fetched as structured data and rendered here instead.
-local INFO_FIELDS = table.concat({
-  'number',
-  'title',
-  'state',
-  'isDraft',
-  'author',
-  'baseRefName',
-  'headRefName',
-  'url',
-  'body',
-  'labels',
-  'reviewDecision',
-  'additions',
-  'deletions',
-  'changedFiles',
-  'comments',
-  'reviews',
-}, ',')
 
 ---------------------------------------------------------------------------
 -- Small helpers
@@ -90,18 +68,15 @@ local function have_gh()
 end
 
 local function git_root()
-  local out = vim.fn.systemlist 'git rev-parse --show-toplevel'
-  if vim.v.shell_error ~= 0 or not out[1] or out[1] == '' then
-    return nil
-  end
-  return out[1]
+  -- Filesystem lookup handles .git directories and linked-worktree .git files
+  -- without blocking the editor on a shell process for every request/buffer.
+  return vim.fs.root(vim.fn.getcwd(), '.git')
 end
 
---- Run a command off the main loop and hand the result back on it.
---- `opts` is merged into the vim.system options (e.g. { stdin = json }).
+--- Run against the captured repository, even if the user changes tabs.
 local function run(cmd, on_done, opts)
   local options = vim.tbl_extend('force', { text = true, cwd = git_root() }, opts or {})
-  vim.system(cmd, options, function(res)
+  return vim.system(cmd, options, function(res)
     vim.schedule(function()
       on_done(res)
     end)
@@ -219,6 +194,232 @@ local function repo_relative(path)
   return nil
 end
 
+-- Language servers key documents by file:// URI and skip nowrite buffers.
+-- Point those APIs at the repo path so dartls/gopls/ts_ls treat a review
+-- blob as that file, with the PR's contents.
+local function patch_review_uris()
+  if vim.g.pr_review_uri_patched then
+    return
+  end
+  vim.g.pr_review_uri_patched = true
+  local orig = vim.uri_from_bufnr
+  vim.uri_from_bufnr = function(bufnr)
+    bufnr = vim._resolve_bufnr(bufnr)
+    if vim.api.nvim_buf_is_valid(bufnr) then
+      local path = vim.b[bufnr].review_lsp_path
+      if type(path) == 'string' and path ~= '' then
+        return vim.uri_from_fname(path)
+      end
+    end
+    return orig(bufnr)
+  end
+end
+
+local function enabled_lsp_names()
+  local names = {}
+  local enabled = rawget(vim.lsp, '_enabled_configs')
+  if type(enabled) == 'table' then
+    for name in pairs(enabled) do
+      names[#names + 1] = name
+    end
+  end
+  if #names > 0 then
+    return names
+  end
+  return {
+    'dartls',
+    'gopls',
+    'ts_ls',
+    'lua_ls',
+    'rust_analyzer',
+    'pyright',
+    'clangd',
+    'jsonls',
+    'yamlls',
+    'html',
+    'cssls',
+    'bashls',
+    'marksman',
+    'tailwindcss',
+    'biome',
+    'eslint',
+  }
+end
+
+local function jump_location(client, loc)
+  local uri = loc.uri or loc.targetUri
+  local range = loc.range or loc.targetSelectionRange
+  if not uri or not range then
+    return
+  end
+  local fname = vim.uri_to_fname(uri)
+  local here = vim.api.nvim_get_current_buf()
+  if vim.b[here].review_lsp_path == fname then
+    pcall(vim.api.nvim_win_set_cursor, 0, { range.start.line + 1, range.start.character })
+    vim.cmd 'normal! zz'
+    return
+  end
+  vim.cmd('tabedit ' .. vim.fn.fnameescape(fname))
+  pcall(vim.api.nvim_win_set_cursor, 0, { range.start.line + 1, range.start.character })
+  vim.cmd 'normal! zz'
+end
+
+local function review_lsp_request(method, empty_msg)
+  local bufnr = vim.api.nvim_get_current_buf()
+  local clients = vim.lsp.get_clients { bufnr = bufnr, method = method }
+  if #clients == 0 then
+    notify('no language server on this diff buffer', vim.log.levels.WARN)
+    return
+  end
+  local client = clients[1]
+  local params = vim.lsp.util.make_position_params(0, client.offset_encoding)
+  client:request(method, params, function(err, result)
+    if err then
+      notify(err.message or tostring(err), vim.log.levels.WARN)
+      return
+    end
+    if not result or vim.tbl_isempty(result) then
+      notify(empty_msg, vim.log.levels.INFO)
+      return
+    end
+    local loc = result
+    if type(result) == 'table' and result[1] then
+      loc = result[1]
+    end
+    jump_location(client, loc)
+  end, bufnr)
+end
+
+local function map_review_lsp(bufnr)
+  local function bufmap(lhs, method, desc, empty)
+    vim.keymap.set('n', lhs, function()
+      review_lsp_request(method, empty)
+    end, { buffer = bufnr, desc = 'LSP: ' .. desc })
+  end
+  bufmap('gd', 'textDocument/definition', 'Goto definition', 'no definition')
+  bufmap('grd', 'textDocument/definition', 'Goto definition', 'no definition')
+  bufmap('gri', 'textDocument/implementation', 'Goto implementation', 'no implementation')
+  bufmap('grt', 'textDocument/typeDefinition', 'Goto type', 'no type definition')
+  bufmap('grD', 'textDocument/declaration', 'Goto declaration', 'no declaration')
+end
+
+vim.api.nvim_create_autocmd('LspAttach', {
+  group = vim.api.nvim_create_augroup('pr-review-lsp-maps', { clear = true }),
+  callback = function(event)
+    if not vim.b[event.buf].review_lsp_path then
+      return
+    end
+    -- Normal LspAttach mappings run during async server initialisation.
+    vim.schedule(function()
+      if vim.api.nvim_buf_is_valid(event.buf) then
+        map_review_lsp(event.buf)
+      end
+    end)
+  end,
+})
+
+function M.attach_diff_lsp(bufnr)
+  bufnr = bufnr or vim.api.nvim_get_current_buf()
+  if not vim.api.nvim_buf_is_valid(bufnr) then
+    return
+  end
+  -- Working-tree sides are real files; the normal LSP autocmd already runs.
+  if vim.bo[bufnr].buftype == '' then
+    return
+  end
+  local name = vim.api.nvim_buf_get_name(bufnr)
+  if not vim.startswith(name, 'diffview://') or name:find('diffview://null', 1, true) then
+    return
+  end
+  local ft = vim.bo[bufnr].filetype
+  if ft == '' or ft == 'DiffviewFileHistory' or ft == 'DiffviewFiles' then
+    return
+  end
+
+  if require('config.buffer').large(bufnr) then
+    return
+  end
+  if package.loaded.lazy then
+    require('lazy').load { plugins = { 'nvim-lspconfig' } }
+  end
+  local lib = require 'diffview.lib'
+  local view = lib.get_current_view()
+  local root = view and view.adapter.ctx.toplevel or git_root()
+  local git_dir = view and view.adapter.ctx.dir
+  local prefix = git_dir and ('diffview://' .. git_dir .. '/')
+  local rel
+  if prefix and vim.startswith(name, prefix) then
+    rel = name:sub(#prefix + 1):match '^[^/]+/(.+)$'
+  else
+    rel = repo_relative(name)
+  end
+  if not rel or not root then
+    return
+  end
+  local abs = root .. '/' .. rel
+  vim.b[bufnr].review_lsp_path = abs
+  patch_review_uris()
+
+  if vim.b[bufnr].review_lsp_attempted then
+    return
+  end
+  vim.b[bufnr].review_lsp_attempted = true
+  map_review_lsp(bufnr)
+  vim.diagnostic.enable(false, { bufnr = bufnr })
+
+  -- Root callbacks expect a real filename, not diffview://.../.git/SHA/path.
+  -- bufadd supplies that name without reading the file or triggering FileType.
+  local probe = vim.fn.bufadd(abs)
+  local function start(config, project_root)
+    if not vim.api.nvim_buf_is_valid(bufnr) or type(project_root) ~= 'string' then
+      return
+    end
+    config.root_dir = project_root
+    vim.lsp.start(config, { bufnr = bufnr }) -- Default reuse matches name AND root.
+  end
+  for _, name_ in ipairs(enabled_lsp_names()) do
+    if vim.lsp.is_enabled(name_) and not vim.tbl_contains(M.config.review_lsp_exclude, name_) then
+      local config = vim.lsp.config[name_]
+      if type(config) == 'table' and type(config.filetypes) == 'table' and vim.tbl_contains(config.filetypes, ft) then
+        config = vim.deepcopy(config)
+        if type(config.root_dir) == 'function' then
+          -- Respect callbacks that deliberately decline this project (e.g. Deno).
+          config.root_dir(probe, function(project_root)
+            start(config, project_root)
+          end)
+        else
+          local project_root = config.root_dir or (config.root_markers and vim.fs.root(abs, config.root_markers))
+          start(config, project_root)
+        end
+      end
+    end
+  end
+end
+
+-- Diffview may open several buffers before hiding them behind the summary.
+-- Only start navigation servers for a diff the user actually stays on.
+function M.prepare_diff_lsp(bufnr)
+  if not vim.api.nvim_buf_is_valid(bufnr) or vim.bo[bufnr].buftype == '' then
+    return
+  end
+  local lib = require 'diffview.lib'
+  local view = lib.get_current_view()
+  local sequence = (vim.b[bufnr].review_lsp_sequence or 0) + 1
+  vim.b[bufnr].review_lsp_sequence = sequence
+  vim.defer_fn(function()
+    if not vim.api.nvim_buf_is_valid(bufnr) or vim.b[bufnr].review_lsp_sequence ~= sequence then
+      return
+    end
+    if view ~= lib.get_current_view() or (view and view._pr_overview_pending) then
+      return
+    end
+    if #vim.fn.win_findbuf(bufnr) == 0 then
+      return
+    end
+    M.attach_diff_lsp(bufnr)
+  end, 150)
+end
+
 local function in_visual()
   local mode = vim.fn.mode()
   return mode == 'v' or mode == 'V' or mode == '\22'
@@ -277,14 +478,33 @@ local function save_queue(number, queue)
   vim.fn.writefile({ vim.json.encode(queue) }, queue_path(number))
 end
 
---- Notes file contents with the seeded <!-- --> header stripped.
+--- Write the open gn buffer if it is this PR's notes file.
+local function flush_notes(number)
+  local path = vim.fn.fnamemodify(notes_path(number), ':p')
+  local buf = vim.fn.bufnr(path)
+  if buf ~= -1 and vim.api.nvim_buf_is_valid(buf) and vim.bo[buf].modified then
+    pcall(vim.api.nvim_buf_call, buf, function()
+      vim.cmd 'silent write'
+    end)
+  end
+end
+
+--- Notes contents with the seeded <!-- --> header stripped. Prefers the live
+--- gn buffer so unsaved drafts still go out.
 local function notes_body(number)
-  local path = notes_path(number)
-  if vim.fn.filereadable(path) == 0 then
+  flush_notes(number)
+  local path = vim.fn.fnamemodify(notes_path(number), ':p')
+  local buf = vim.fn.bufnr(path)
+  local lines
+  if buf ~= -1 and vim.api.nvim_buf_is_valid(buf) then
+    lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  elseif vim.fn.filereadable(path) == 1 then
+    lines = vim.fn.readfile(path)
+  else
     return ''
   end
   local kept = {}
-  for _, line in ipairs(vim.fn.readfile(path)) do
+  for _, line in ipairs(lines) do
     if not line:match '^%s*<!%-%-' then
       table.insert(kept, line)
     end
@@ -358,77 +578,108 @@ end
 
 --- Fetch the PR head and its base branch, then diff head against the merge
 --- base. Nothing is checked out, so your working tree is untouched.
-function M.open(pr)
-  local remote = M.config.remote
-  local base = pr.baseRefName
+function M.open(pr, opts)
+  opts = opts or {}
+  local root = pr._root or git_root()
+  if not root then
+    notify('not inside a git repo', vim.log.levels.ERROR)
+    return
+  end
+  open_generation = open_generation + 1
+  local generation = open_generation
+  if cancel_open_summary then
+    cancel_open_summary()
+  end
+  local remote, base = M.config.remote, pr.baseRefName
   local ref = ('refs/pr/%d'):format(pr.number)
-
-  notify(('#%d fetching (%s -> %s)'):format(pr.number, pr.headRefName, base))
-
-  run({
-    'git',
-    'fetch',
-    remote,
-    ('+refs/pull/%d/head:%s'):format(pr.number, ref),
-    ('+refs/heads/%s:refs/remotes/%s/%s'):format(base, remote, base),
-  }, function(res)
-    if res.code ~= 0 then
-      notify('fetch failed: ' .. (res.stderr or ''), vim.log.levels.ERROR)
+  local view, ready, summary, summary_error, shown
+  local function overview()
+    if generation ~= open_generation or shown or not ready or not view then
       return
     end
-    -- Leave the previous review behind before opening this one.
+    if not summary and not summary_error then
+      return
+    end
+    local lib = require 'diffview.lib'
+    -- A late response must never replace a different tab or selected file.
+    if lib.get_current_view() ~= view then
+      return
+    end
+    shown = true
+    view._pr_overview_pending = false
+    local text = summary_error or render_info(summary)
+    show_in_main(scratch_buf(('PR #%d'):format(pr.number), text, 'markdown'))
+  end
+  if M.config.overview_on_open then
+    cancel_open_summary = review_data.summary(root, pr.number, function(err, data)
+      summary_error, summary = err, data
+      overview()
+    end, opts.force)
+  end
+  local started = vim.uv.hrtime()
+  review_data.fetch(root, remote, pr, function(err, refs, cached)
+    if generation ~= open_generation then
+      return
+    end
+    if err then
+      if cancel_open_summary then
+        cancel_open_summary()
+      end
+      notify(err, vim.log.levels.ERROR)
+      return
+    end
+    pr.headRefOid, pr.baseRefOid = refs.head, refs.base
+    M.last_open = { cached = cached, fetch_ms = (vim.uv.hrtime() - started) / 1e6 }
     if M.config.close_previous then
       close_previous(M.current and M.current.number)
     end
-
+    pr._root = root
     M.current = pr
-    -- Three dots: merge base of the PR's own target branch vs the PR head, so
-    -- merges of the base back into the branch do not show up as the author's
-    -- changes.
-    local ok, err = pcall(vim.cmd, ('DiffviewOpen %s/%s...%s'):format(remote, base, ref))
+    local ok, err = pcall(vim.cmd, ('DiffviewOpen -C=%s %s/%s...%s'):format(vim.fn.fnameescape(root), remote, base, ref))
     if not ok then
       notify('DiffviewOpen failed: ' .. tostring(err), vim.log.levels.ERROR)
       return
     end
-    -- Land on the PR summary rather than whichever file diffview opened first.
-    -- Registered after DiffviewOpen (DiffviewGlobal only exists once the plugin
-    -- has loaded) but before its async file loading finishes, so the event is
-    -- still ahead of us.
-    if M.config.overview_on_open then
-      local shown = false
-      local function overview()
-        if shown then
-          return
+    view = require('diffview.lib').get_current_view()
+    if view and M.config.overview_on_open then
+      view._pr_overview_pending = true
+      local function loaded()
+        ready = true
+        vim.schedule(overview)
+      end
+      view.emitter:once('file_open_post', loaded)
+      view.emitter:once('files_updated', function(_, files)
+        if files:len() == 0 then
+          loaded()
         end
-        shown = true
-        M.info { pr = pr, main_only = true }
+      end)
+      -- Do not steal focus after the user starts navigating the diff.
+      view.emitter:on('file_open_pre', function()
+        if ready then
+          shown = true
+          view._pr_overview_pending = false
+        end
+      end)
+      if view.initialized and view.cur_entry then
+        loaded()
       end
-
-      local global = rawget(_G, 'DiffviewGlobal')
-      local emitter = global and global.emitter
-      if emitter and emitter.once then
-        emitter:once('diff_buf_win_enter', function()
-          vim.schedule(overview)
-        end)
-      end
-      -- Fallback: a PR with no files never fires that event.
-      vim.defer_fn(overview, 2000)
     end
-
     local pending = #load_queue(pr.number)
     if pending > 0 then
-      notify(('#%d %s (%d comments still queued)'):format(pr.number, pr.title, pending))
-    else
-      notify(('#%d %s'):format(pr.number, pr.title))
+      notify(('%d comments still queued for #%d'):format(pending, pr.number))
     end
-  end)
+  end, opts.force)
 end
 
 ---------------------------------------------------------------------------
 -- Picker
 ---------------------------------------------------------------------------
 
-function M.show_picker(prs, base_filter)
+function M.show_picker(prs, base_filter, scope)
+  scope = scope or 'mine'
+  local root = prs[1] and prs[1]._root or git_root()
+  local preview_generation = 0
+  local cancel_preview, cancel_prefetch
   local pickers = require 'telescope.pickers'
   local finders = require 'telescope.finders'
   local conf = require('telescope.config').values
@@ -453,7 +704,6 @@ function M.show_picker(prs, base_filter)
     end
   end
   if #shown == 0 and base_filter then
-    notify(('nothing targeting %s -- showing all bases'):format(base_filter))
     shown, base_filter = candidates, nil
   end
 
@@ -462,10 +712,15 @@ function M.show_picker(prs, base_filter)
     items = { { width = 6 }, { width = 14 }, { width = 16 }, { remaining = true } },
   }
 
+  local who = scope == 'all' and 'Awaiting review' or 'Your review queue'
+  local hint = scope == 'all' and 'C-o yours' or 'C-o all'
+  local title = base_filter and ('%s -> %s  (%s)'):format(who, base_filter, hint) or ('%s (all bases)  (%s)'):format(who, hint)
+
   pickers
     .new({}, {
-      prompt_title = base_filter and ('PRs for review -> ' .. base_filter)
-        or 'PRs for review (all bases)',
+      prompt_title = title,
+      layout_strategy = 'vertical',
+      layout_config = { width = 0.95, height = 0.95, preview_height = 0.7, preview_cutoff = 0, prompt_position = 'top' },
       finder = finders.new_table {
         results = shown,
         entry_maker = function(pr)
@@ -488,7 +743,24 @@ function M.show_picker(prs, base_filter)
       -- Preview the PR summary -- the same thing <leader>gi shows once it is
       -- open -- rather than the first file's diff.
       previewer = previewers.new_buffer_previewer {
-        title = 'PR summary',
+        title = 'Description & details | C-d/C-u scroll | C-End/C-Home end/start',
+        scroll_fn = function(self, direction)
+          local win = self.state and self.state.winid
+          if win and vim.api.nvim_win_is_valid(win) then
+            vim.api.nvim_win_call(win, function()
+              vim.cmd.normal { args = { math.abs(direction) .. string.char(direction > 0 and 5 or 25) }, bang = true }
+            end)
+          end
+        end,
+        teardown = function()
+          preview_generation = preview_generation + 1
+          if cancel_preview then
+            cancel_preview()
+          end
+          if cancel_prefetch then
+            cancel_prefetch()
+          end
+        end,
         -- One preview buffer per PR, so a slow gh call still lands in the
         -- buffer belonging to the entry that asked for it.
         get_buffer_by_name = function(_, entry)
@@ -497,38 +769,72 @@ function M.show_picker(prs, base_filter)
         define_preview = function(self, entry)
           local number = entry.value.number
           local bufnr = self.state.bufnr
+          local win = self.state.winid
+          vim.wo[win].wrap = true
+          vim.wo[win].linebreak = true
+          vim.wo[win].breakindent = true
+          vim.wo[win].smoothscroll = true
+          vim.wo[win].conceallevel = 0
 
           local function fill(text)
             if not vim.api.nvim_buf_is_valid(bufnr) then
               return
             end
+            local saved_view
+            if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == bufnr then
+              saved_view = vim.api.nvim_win_call(win, vim.fn.winsaveview)
+            end
             vim.bo[bufnr].modifiable = true
             vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, vim.split(text, '\n', { plain = true }))
+            if saved_view then
+              vim.api.nvim_win_call(win, function()
+                vim.fn.winrestview(saved_view)
+              end)
+            end
             pcall(function()
               require('telescope.previewers.utils').highlighter(bufnr, 'markdown')
             end)
           end
 
-          if M._info_cache[number] then
-            fill(M._info_cache[number])
+          preview_generation = preview_generation + 1
+          local generation = preview_generation
+          if cancel_preview then
+            cancel_preview()
+          end
+          if cancel_prefetch then
+            cancel_prefetch()
+          end
+          local cached = review_data.peek_summary(root, number)
+          local initial = cached or vim.deepcopy(entry.value)
+          if initial.body == nil then
+            initial.body = '_Loading description…_'
+          end
+          local preview = render_info(initial)
+          if not cached then
+            preview = preview .. '\n\n_Loading comments and reviews…_'
+          end
+          fill(preview)
+          -- Give the preview a chance to paint; don't fetch every row while
+          -- scrolling. No Diffview windows or language servers start here.
+          vim.defer_fn(function()
+            if generation == preview_generation and vim.api.nvim_buf_is_valid(bufnr) then
+              cancel_prefetch = review_data.prefetch(root, M.config.remote, entry.value)
+            end
+          end, 220)
+          if cached then
             return
           end
-
-          fill(('# #%d %s\n\nloading...'):format(number, entry.value.title or ''))
-
-          run({ 'gh', 'pr', 'view', tostring(number), '--json', INFO_FIELDS }, function(res)
-            if res.code ~= 0 then
-              fill('gh pr view failed:\n\n' .. (res.stderr or ''))
+          -- Scrolling quickly should not launch a GitHub request per row.
+          vim.defer_fn(function()
+            if generation ~= preview_generation or not vim.api.nvim_buf_is_valid(bufnr) then
               return
             end
-            local ok, data = pcall(vim.json.decode, res.stdout)
-            if not ok or type(data) ~= 'table' then
-              fill 'could not parse gh output'
-              return
-            end
-            M._info_cache[number] = render_info(data)
-            fill(M._info_cache[number])
-          end)
+            cancel_preview = review_data.summary(root, number, function(err, data)
+              if generation == preview_generation then
+                fill(err and (preview .. '\n\n' .. err) or render_info(data))
+              end
+            end)
+          end, 120)
         end,
       },
       attach_mappings = function(prompt_bufnr, map)
@@ -540,67 +846,97 @@ function M.show_picker(prs, base_filter)
           end
         end)
         -- Toggle between "only PRs targeting the production branch" and everything.
-        local toggle = function()
+        local toggle_base = function()
           actions.close(prompt_bufnr)
           local next_filter = nil
           if not base_filter then
             next_filter = M.config.base_filter
           end
-          M.show_picker(prs, next_filter)
+          M.show_picker(prs, next_filter, scope)
         end
-        map('i', '<C-a>', toggle)
-        map('n', '<C-a>', toggle)
+        -- Re-fetch: your review-requested queue vs every PR still awaiting review.
+        local toggle_scope = function()
+          actions.close(prompt_bufnr)
+          M.pick {
+            scope = scope == 'all' and 'mine' or 'all',
+            base_filter = base_filter,
+            all_bases = base_filter == nil,
+          }
+        end
+        local function preview_edge(at_end)
+          local picker = action_state.get_current_picker(prompt_bufnr)
+          local win = picker.previewer.state.winid
+          if win and vim.api.nvim_win_is_valid(win) then
+            vim.api.nvim_win_call(win, function()
+              vim.cmd.normal { args = { at_end and 'G$zb' or 'ggzt' }, bang = true }
+            end)
+          end
+        end
+        for _, mode in ipairs { 'i', 'n' } do
+          map(mode, '<C-d>', actions.preview_scrolling_down)
+          map(mode, '<C-u>', actions.preview_scrolling_up)
+          map(mode, '<PageDown>', actions.preview_scrolling_down)
+          map(mode, '<PageUp>', actions.preview_scrolling_up)
+          map(mode, '<C-End>', function()
+            preview_edge(true)
+          end)
+          map(mode, '<C-Home>', function()
+            preview_edge(false)
+          end)
+        end
+        map('i', '<C-a>', toggle_base)
+        map('n', '<C-a>', toggle_base)
+        map('i', '<C-o>', toggle_scope)
+        map('n', '<C-o>', toggle_scope)
         return true
       end,
     })
     :find()
 end
 
-function M.pick()
+function M.pick(opts)
   if not have_gh() then
     return
   end
-  M._info_cache = {}
-  notify 'loading PRs...'
+  opts = opts or {}
+  local scope = opts.scope or 'mine'
+  local base_filter
+  if opts.all_bases then
+    base_filter = nil
+  elseif opts.base_filter ~= nil then
+    base_filter = opts.base_filter
+  else
+    base_filter = M.config.base_filter
+  end
 
-  local search = M.config.search
+  local root = git_root()
+  if not root then
+    return notify('not inside a git repo', vim.log.levels.ERROR)
+  end
+
+  local search = scope == 'all' and M.config.all_search or M.config.search
   if M.config.hide_approved then
     search = search .. ' -review:approved'
   end
 
-  run({
-    'gh',
-    'pr',
-    'list',
-    '--state',
-    'open',
-    '--search',
-    search,
-    '--limit',
-    tostring(M.config.limit),
-    '--json',
-    FIELDS,
-  }, function(res)
-    if res.code ~= 0 then
-      notify('gh pr list failed: ' .. (res.stderr or ''), vim.log.levels.ERROR)
-      return
-    end
-    local ok, prs = pcall(vim.json.decode, res.stdout)
-    if not ok or type(prs) ~= 'table' then
-      notify('could not parse gh output', vim.log.levels.ERROR)
-      return
+  review_data.list(root, search, M.config.limit, function(err, prs)
+    if err then
+      return notify(err, vim.log.levels.ERROR)
     end
     if #prs == 0 then
-      notify 'no PRs awaiting your review'
-      return
+      notify(scope == 'all' and 'no open PRs awaiting review' or 'no PRs awaiting your review')
     end
-    M.show_picker(prs, M.config.base_filter)
-  end)
+    for _, pr in ipairs(prs) do
+      pr._root = root
+    end
+    M.show_picker(prs, base_filter, scope)
+  end, opts.force)
 end
 
 --- Open any PR by number, whether or not it is assigned to you. Accepts
 --- "1284", "#1284", or a full pull-request URL.
-function M.open_number(arg)
+function M.open_number(arg, opts)
+  opts = opts or {}
   if not have_gh() then
     return
   end
@@ -627,19 +963,25 @@ function M.open_number(arg)
       return
     end
 
-    notify('loading #' .. number .. '...')
-    run({ 'gh', 'pr', 'view', number, '--json', FIELDS }, function(res)
-      if res.code ~= 0 then
-        notify(('could not load #%s: %s'):format(number, res.stderr or ''), vim.log.levels.ERROR)
+    local root = opts.root or git_root()
+    if not root then
+      return notify('not inside a git repo', vim.log.levels.ERROR)
+    end
+    open_generation = open_generation + 1
+    local generation = open_generation
+    if cancel_open_summary then
+      cancel_open_summary()
+    end
+    review_data.metadata(root, number, function(err, pr)
+      if generation ~= open_generation then
         return
       end
-      local ok, pr = pcall(vim.json.decode, res.stdout)
-      if not ok or type(pr) ~= 'table' or not pr.number then
-        notify('could not parse gh output', vim.log.levels.ERROR)
-        return
+      if err then
+        return notify(err, vim.log.levels.ERROR)
       end
-      M.open(pr)
-    end)
+      pr._root = root
+      M.open(pr, opts)
+    end, opts.force)
   end
 
   if arg and arg ~= '' then
@@ -698,7 +1040,7 @@ function render_info(d)
     for _, label in ipairs(d.labels) do
       table.insert(names, label.name)
     end
-    add('')
+    add ''
     add('labels: ' .. table.concat(names, ', '))
   end
 
@@ -784,23 +1126,23 @@ function M.info(opts)
   if not pr then
     return
   end
-  run({ 'gh', 'pr', 'view', tostring(pr.number), '--json', INFO_FIELDS }, function(res)
-    if res.code ~= 0 then
-      if not opts.main_only then
-        notify('gh pr view failed: ' .. (res.stderr or ''), vim.log.levels.ERROR)
-      end
+  local root = pr._root or git_root()
+  if not root then
+    return
+  end
+  local generation = open_generation
+  review_data.summary(root, pr.number, function(err, data)
+    if generation ~= open_generation then
       return
     end
-    local ok, data = pcall(vim.json.decode, res.stdout)
-    if not ok or type(data) ~= 'table' then
-      notify('could not parse gh output', vim.log.levels.ERROR)
-      return
+    if err then
+      return notify(err, vim.log.levels.ERROR)
     end
     local buf = scratch_buf(('PR #%d'):format(pr.number), render_info(data), 'markdown')
     if not show_in_main(buf) and not opts.main_only then
       open_split(buf)
     end
-  end)
+  end, true) -- Explicit <leader>gi always refreshes comments/reviews.
 end
 
 --- Open the PR on github.com in the system browser.
@@ -849,13 +1191,8 @@ local function in_diff_window()
 end
 
 --- Open the working-tree copy of the file under review in a new tab, at the
---- same line, where LSP actually works.
----
---- The diff buffers are `diffview://` scratch buffers holding a git blob from a
---- revision that was never checked out, so no language server can attach to
---- them or resolve anything around them. This is your branch's copy of the
---- file, not the PR's -- fine for "where is this defined" and "who calls this",
---- wrong for any line the PR actually changed.
+--- same line. gd on the diff already talks to LSP using the PR text; this is
+--- the escape hatch when you want your branch's file instead.
 function M.open_local()
   local ok, lib = pcall(require, 'diffview.lib')
   local view = ok and lib.get_current_view()
@@ -1064,7 +1401,7 @@ function M.queued()
     table.insert(lines, ('%d. [%s] %s:%s  %s'):format(i, c.side, c.path, where, head))
   end
   table.insert(lines, '')
-  table.insert(lines, ('-- :PRUncomment <n> to drop one, <leader>gQ to clear all'))
+  table.insert(lines, '-- :PRUncomment <n> to drop one, <leader>gQ to clear all')
   scratch(('PR #%d queued comments'):format(pr.number), table.concat(lines, '\n'))
 end
 
@@ -1139,11 +1476,9 @@ local function api_post(endpoint, payload, on_done)
 end
 
 --- Submit the summary and every queued line comment as one review.
-function M.submit(kind)
-  local pr = require_current()
-  if not pr then
-    return
-  end
+--- opts.skip_confirm / opts.on_done are for close-PR, which already confirmed.
+local function submit_review(pr, kind, opts)
+  opts = opts or {}
   local ev = EVENTS[kind]
   if not ev then
     notify('unknown review type: ' .. tostring(kind), vim.log.levels.ERROR)
@@ -1166,10 +1501,7 @@ function M.submit(kind)
   -- A verdict needs something behind it, but line comments count -- an empty
   -- summary is fine when you have already said it inline.
   if body == '' and #queue == 0 and ev.event ~= 'APPROVE' then
-    notify(
-      ev.label .. ' needs a summary (<leader>gn) or at least one line comment',
-      vim.log.levels.WARN
-    )
+    notify(ev.label .. ' needs a summary (<leader>gn) or at least one line comment', vim.log.levels.WARN)
     return
   end
   local payload = { commit_id = pr.headRefOid }
@@ -1180,19 +1512,24 @@ function M.submit(kind)
     payload.comments = queue
   end
 
-  local prompt
-  if #queue == 0 and body == '' then
-    prompt = ('%s #%d with no comments?'):format(ev.label, pr.number)
-  else
-    prompt = ('%s on #%d with %d line comment(s)?'):format(ev.label, pr.number, #queue)
-  end
-  if vim.fn.confirm(prompt, '&Yes\n&No', 2) ~= 1 then
-    return
+  if not opts.skip_confirm then
+    local prompt
+    if #queue == 0 and body == '' then
+      prompt = ('%s #%d with no comments?'):format(ev.label, pr.number)
+    else
+      prompt = ('%s on #%d with %d line comment(s)?'):format(ev.label, pr.number, #queue)
+    end
+    if vim.fn.confirm(prompt, '&Yes\n&No', 2) ~= 1 then
+      return
+    end
   end
 
   local function finished()
     save_queue(pr.number, {})
     notify(('#%d submitted (%s, %d line comments)'):format(pr.number, ev.label, #queue))
+    if opts.on_done then
+      opts.on_done()
+    end
   end
 
   local function failed(res, what)
@@ -1244,6 +1581,72 @@ function M.submit(kind)
   end)
 end
 
+function M.submit(kind)
+  local pr = require_current()
+  if not pr then
+    return
+  end
+  submit_review(pr, kind)
+end
+
+--- Close the GitHub PR. Posts the gn notes and any queued line comments first.
+function M.close_pr()
+  local pr = require_current()
+  if not pr then
+    return
+  end
+  if not have_gh() then
+    return
+  end
+
+  vim.cmd 'silent! wall'
+  local body = notes_body(pr.number)
+  local queue = load_queue(pr.number)
+
+  local prompt
+  if body ~= '' or #queue > 0 then
+    prompt = ('Close #%d on GitHub, sending gn notes and %d line comment(s)?'):format(pr.number, #queue)
+  else
+    prompt = ('Close #%d on GitHub with no comment?'):format(pr.number)
+  end
+  if vim.fn.confirm(prompt, '&Yes\n&No', 2) ~= 1 then
+    return
+  end
+
+  local function tear_down()
+    close_previous(pr.number)
+    M.current = nil
+  end
+
+  local function do_close()
+    local cmd = { 'gh', 'pr', 'close', tostring(pr.number) }
+    -- Line comments already went out as a review (with the notes as its body).
+    -- Notes-only uses --comment so the close reason is on the issue thread.
+    if body ~= '' and #queue == 0 then
+      table.insert(cmd, '--comment')
+      table.insert(cmd, body)
+    end
+    run(cmd, function(res)
+      if res.code ~= 0 then
+        local err = res.stderr
+        if err == nil or err == '' then
+          err = res.stdout
+        end
+        notify('close failed: ' .. (err or ''), vim.log.levels.ERROR)
+        return
+      end
+      notify(('#%d closed'):format(pr.number))
+      tear_down()
+    end)
+  end
+
+  if #queue > 0 then
+    submit_review(pr, 'comment', { skip_confirm = true, on_done = do_close })
+    return
+  end
+  do_close()
+end
+
 ---------------------------------------------------------------------------
 -- Permalinks, for referring to code outside the diff
 ---------------------------------------------------------------------------
@@ -1256,7 +1659,7 @@ function M.permalink()
   end
   local rel = repo_relative(vim.fn.expand '%:p')
   if not rel then
-    notify('could not work out this file\'s path in the repo', vim.log.levels.WARN)
+    notify("could not work out this file's path in the repo", vim.log.levels.WARN)
     return
   end
 
@@ -1292,11 +1695,11 @@ end
 map('<leader>gr', M.pick, 'Review: pick a PR')
 map('<leader>gR', function()
   if M.current then
-    M.open(M.current)
+    M.open_number(tostring(M.current.number), { force = true, root = M.current._root })
   else
     M.pick()
   end
-end, 'Review: reopen current PR diff')
+end, 'Review: refresh current PR from GitHub')
 map('<leader>gi', function()
   M.info()
 end, 'Review: PR description + comments')
@@ -1322,6 +1725,7 @@ end, 'Review: submit comment')
 map('<leader>gX', function()
   M.submit 'request'
 end, 'Review: submit request-changes')
+map('<leader>gZ', M.close_pr, 'Review: close PR (send gn notes)')
 
 map('<leader>gy', M.permalink, 'Review: yank GitHub permalink', { 'n', 'x' })
 
@@ -1334,15 +1738,21 @@ map('[h', function()
 end, 'Previous git hunk')
 
 vim.api.nvim_create_user_command('PRReview', function(opts)
-  if opts.args and opts.args ~= '' then
-    M.open_number(opts.args)
+  if opts.args == 'all' then
+    M.pick { scope = 'all', force = opts.bang }
+  elseif opts.args and opts.args ~= '' then
+    M.open_number(opts.args, { force = opts.bang })
   else
-    M.pick()
+    M.pick { force = opts.bang }
   end
-end, { nargs = '?', desc = 'Review a PR: pick from your queue, or pass a number/url' })
+end, { bang = true, nargs = '?', desc = 'Review a PR: pick from your queue, all open PRs, or a number/url' })
 
 vim.api.nvim_create_user_command('PRUncomment', function(opts)
   M.unqueue(opts.args)
 end, { nargs = 1, desc = 'Drop a queued review comment by index' })
+
+vim.api.nvim_create_user_command('PRClose', function()
+  M.close_pr()
+end, { desc = 'Close the current PR, sending gn notes and queued comments' })
 
 return M

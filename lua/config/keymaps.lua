@@ -1,5 +1,5 @@
 vim.keymap.set('n', '<Esc>', '<cmd>nohlsearch<CR>')
-vim.keymap.set('n', '<leader>q', vim.diagnostic.setloclist, { desc = 'Open diagnostic quickfix' })
+vim.keymap.set('n', '<leader>q', vim.diagnostic.setloclist, { desc = 'Open buffer diagnostic location list' })
 vim.keymap.set('n', '<leader>Q', vim.diagnostic.setqflist, { desc = 'Open diagnostic qflist' })
 vim.keymap.set('t', '<Esc><Esc>', '<C-\\><C-n>', { desc = 'Exit terminal mode' })
 
@@ -30,7 +30,7 @@ vim.keymap.set('n', '<leader>me', '<cmd>Pencil<CR>', { desc = 'Markdown edit mod
 vim.keymap.set('n', '<leader>mn', '<cmd>noautocmd MarkdownPreviewStop<CR>', { desc = 'Markdown stop preview' })
 
 vim.keymap.set({ 'n', 'x' }, '<leader>y', '"+y', { desc = 'Yank to system clipboard' })
-vim.keymap.set('n', '<leader>yp', function()
+vim.keymap.set('n', '<leader>Y', function()
   local path = vim.fn.expand '%:p'
   path = path:gsub('^%a[%w.+-]*://', '')
   vim.fn.setreg('+', path)
@@ -64,24 +64,15 @@ vim.keymap.set('n', '<leader>fc', function()
   require('telescope.builtin').colorscheme()
 end, { desc = 'Find colorschemes' })
 
-vim.keymap.set('n', '<leader>so', '<cmd>source<CR>', { desc = 'Source init.lua' })
+vim.keymap.set('n', '<leader>so', '<cmd>source<CR>', { desc = 'Source current buffer' })
 
 vim.keymap.set('n', '<leader>gb', function()
   require('gitsigns').blame_line()
 end, { desc = 'Git blame line' })
 
 vim.keymap.set('n', '<leader>gS', function()
-  local file = vim.fn.expand('%:p')
-  local line = vim.fn.line('.')
-  local cmd = 'git blame -L ' .. line .. ',' .. line .. ' -s ' .. vim.fn.shellescape(file)
-  local output = vim.fn.system(cmd)
-  local commit = output:match('^(%w+)')
-  if commit and commit ~= '0000000000000000000000000000000000000000' then
-    vim.cmd('tab G show ' .. commit)
-  else
-    vim.notify('No commit found for this line')
-  end
-end, { desc = 'Git show full commit for current line' })
+  require('config.tasks').show_commit()
+end, { desc = 'Git show commit for current line' })
 
 -- Git hunk operations (gitsigns)
 vim.keymap.set('n', '<leader>hs', function()
@@ -100,10 +91,10 @@ vim.keymap.set('n', '<leader>hd', function()
   require('gitsigns').diffthis()
 end, { desc = 'Diff this file' })
 vim.keymap.set('v', '<leader>hs', function()
-  require('gitsigns').stage_hunk { vim.fn.line('.'), vim.fn.line('v') }
+  require('gitsigns').stage_hunk { vim.fn.line '.', vim.fn.line 'v' }
 end, { desc = 'Stage hunk' })
 vim.keymap.set('v', '<leader>hr', function()
-  require('gitsigns').reset_hunk { vim.fn.line('.'), vim.fn.line('v') }
+  require('gitsigns').reset_hunk { vim.fn.line '.', vim.fn.line 'v' }
 end, { desc = 'Reset hunk' })
 
 -- Git operations (fugitive)
@@ -114,274 +105,12 @@ vim.keymap.set('n', '<leader>gp', '<cmd>Git pull<CR>', { desc = 'Git pull' })
 vim.keymap.set('n', '<leader>gP', '<cmd>Git push<CR>', { desc = 'Git push' })
 vim.keymap.set('n', '<leader>gF', '<cmd>Git fetch<CR>', { desc = 'Git fetch' })
 
--- Makefile project: build, run, debug
-local last_exe_file = vim.fn.stdpath('data') .. '/make_last_exe.json'
-local last_exe = {}
-
-local function load_last_exe()
-  local ok, data = pcall(vim.fn.readfile, last_exe_file)
-  if ok and #data > 0 then
-    pcall(function() last_exe = vim.fn.json_decode(table.concat(data, '\n')) end)
-  end
+-- Build tasks load on demand and never block the editor.
+for key, action in pairs { mb = 'build', mr = 'run', md = 'debug' } do
+  vim.keymap.set('n', '<leader>' .. key, function()
+    require('config.tasks').make(action ~= 'build' and action or nil)
+  end, { desc = 'Make ' .. action })
 end
-
-local function save_last_exe()
-  vim.fn.writefile({ vim.fn.json_encode(last_exe) }, last_exe_file)
-end
-
-load_last_exe()
-
-local function make_find_dir()
-  local buf_path = vim.fn.expand '%:p'
-  local dir = buf_path:gsub('^%a[%w.+-]*://', '')
-  dir = vim.fn.fnamemodify(dir, ':h')
-  if vim.fn.isdirectory(dir) ~= 1 then
-    dir = vim.fn.getcwd()
-  end
-  local mf = vim.fn.findfile('Makefile', dir .. ';')
-  if mf == '' then
-    for _, sub in ipairs({ 'src', 'build', '.' }) do
-      local p = dir .. '/' .. sub .. '/Makefile'
-      if vim.fn.filereadable(p) == 1 then mf = p; break end
-    end
-  end
-  if mf == '' then
-    vim.notify('No Makefile found', vim.log.levels.ERROR)
-    return nil
-  end
-  return vim.fn.fnamemodify(mf, ':h')
-end
-
-local function make_build()
-  vim.cmd 'wa'
-  local make_dir = make_find_dir()
-  if not make_dir then return false end
-  local nproc = tonumber(vim.fn.system('nproc')) or 1
-  local out = vim.fn.system('make -j' .. nproc .. ' -C ' .. vim.fn.shellescape(make_dir) .. ' 2>&1')
-  if vim.v.shell_error ~= 0 then
-    local lines = vim.split(out, '\n')
-    vim.notify('Build failed', vim.log.levels.ERROR)
-    local buf = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-    vim.api.nvim_set_option_value('buftype', 'nofile', { buf = buf })
-    vim.api.nvim_set_option_value('bufhidden', 'wipe', { buf = buf })
-    vim.api.nvim_set_current_buf(buf)
-    return false
-  end
-  vim.notify('Build OK', vim.log.levels.INFO)
-  return make_dir
-end
-
-local function make_find_exe(make_dir)
-  if last_exe[make_dir] and vim.fn.executable(last_exe[make_dir]) == 1 then
-    return last_exe[make_dir]
-  end
-  local candidates = {}
-  for _, pat in ipairs({ make_dir .. '/*', make_dir .. '/build/*', vim.fn.getcwd() .. '/*' }) do
-    for _, f in ipairs(vim.fn.glob(pat, false, true)) do
-      if vim.fn.executable(f) == 1 and not vim.fn.isdirectory(f) then
-        table.insert(candidates, f)
-      end
-    end
-  end
-  local exe
-  if #candidates == 1 then
-    exe = candidates[1]
-  elseif #candidates > 1 then
-    local idx = vim.fn.inputlist(vim.list_extend({ 'Select executable:' }, candidates))
-    if idx > 0 and idx <= #candidates then exe = candidates[idx] end
-  end
-  if not exe or exe == '' then
-    exe = vim.fn.input('Executable: ', vim.fn.getcwd() .. '/', 'file')
-  end
-  if exe ~= '' then
-    last_exe[make_dir] = exe
-    save_last_exe()
-  end
-  return exe
-end
-
-vim.keymap.set('n', '<leader>mb', function()
-  make_build()
-end, { desc = 'Make build' })
-
-vim.keymap.set('n', '<leader>mr', function()
-  local make_dir = make_build()
-  if not make_dir then return end
-  local exe = make_find_exe(make_dir)
-  if exe ~= '' and vim.fn.executable(exe) == 1 then
-    vim.cmd('belowright 15split | terminal ' .. vim.fn.shellescape(exe))
-  else
-    vim.notify('No executable selected', vim.log.levels.WARN)
-  end
-end, { desc = 'Make build & run' })
-
-vim.keymap.set('n', '<leader>md', function()
-  local make_dir = make_build()
-  if not make_dir then return end
-  local exe = make_find_exe(make_dir)
-  if exe ~= '' then
-    require('dap').run {
-      type = 'lldb',
-      request = 'launch',
-      program = exe,
-      cwd = vim.fn.getcwd(),
-      stopOnEntry = false,
-      args = {},
-      runInTerminal = true,
-    }
-  else
-    vim.notify('No executable selected', vim.log.levels.WARN)
-  end
-end, { desc = 'Make build & debug' })
-
--- Format the whole C/C++ project with clang-format
 vim.keymap.set('n', '<leader>F', function()
-  local src_files = vim.fn.glob('src/**/*.{cpp,h}', false, true)
-  local tools_files = vim.fn.glob('tools/**/*.{cpp,h}', false, true)
-  local all_files = vim.list_extend(src_files, tools_files)
-  if #all_files == 0 then
-    vim.notify('No C/C++ source files found', vim.log.levels.WARN)
-    return
-  end
-  local cmd = 'clang-format -i --verbose ' .. table.concat(all_files, ' ')
-  vim.fn.system(cmd)
-  if vim.v.shell_error == 0 then
-    vim.notify('Formatted ' .. #all_files .. ' files', vim.log.levels.INFO)
-  else
-    vim.notify('clang-format failed', vim.log.levels.ERROR)
-  end
-end, { desc = 'Format entire project with clang-format' })
-
--- CMake helpers: always export compile_commands.json for LSP
-local function cmake_find_build_dir()
-  local buf_path = vim.fn.expand '%:p'
-  local dir = buf_path:gsub('^%a[%w.+-]*://', '')
-  dir = vim.fn.fnamemodify(dir, ':h')
-  if vim.fn.isdirectory(dir) ~= 1 then
-    dir = vim.fn.getcwd()
-  end
-  local cmake_file = vim.fn.findfile('CMakeLists.txt', dir .. ';')
-  if cmake_file == '' then
-    vim.notify('No CMakeLists.txt found', vim.log.levels.ERROR)
-    return nil
-  end
-  return vim.fn.fnamemodify(cmake_file, ':h')
-end
-
-local function cmake_configure()
-  local src_dir = cmake_find_build_dir()
-  if not src_dir then return false end
-  local build_dir = src_dir .. '/build'
-  if vim.fn.isdirectory(build_dir) ~= 1 then
-    vim.fn.mkdir(build_dir, 'p')
-  end
-  local cmd = 'cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -S ' .. vim.fn.shellescape(src_dir) .. ' -B ' .. vim.fn.shellescape(build_dir) .. ' 2>&1'
-  local out = vim.fn.system(cmd)
-  if vim.v.shell_error ~= 0 then
-    vim.notify('CMake configure failed', vim.log.levels.ERROR)
-    return false
-  end
-  vim.notify('CMake configured (compile_commands.json generated)', vim.log.levels.INFO)
-  return build_dir
-end
-
-local function cmake_build()
-  vim.cmd 'wa'
-  local src_dir = cmake_find_build_dir()
-  if not src_dir then return false end
-  local build_dir = src_dir .. '/build'
-  if vim.fn.isdirectory(build_dir) ~= 1 then
-    vim.notify('Build dir missing, run CMake configure first', vim.log.levels.WARN)
-    return false
-  end
-  local nproc = tonumber(vim.fn.system('nproc')) or 1
-  local out = vim.fn.system('cmake --build ' .. vim.fn.shellescape(build_dir) .. ' -j' .. nproc .. ' 2>&1')
-  if vim.v.shell_error ~= 0 then
-    local lines = vim.split(out, '\n')
-    vim.notify('Build failed', vim.log.levels.ERROR)
-    local buf = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-    vim.api.nvim_set_option_value('buftype', 'nofile', { buf = buf })
-    vim.api.nvim_set_option_value('bufhidden', 'wipe', { buf = buf })
-    vim.api.nvim_set_current_buf(buf)
-    return false
-  end
-  vim.notify('Build OK', vim.log.levels.INFO)
-  return build_dir
-end
-
-local function cmake_find_exe(build_dir)
-  local candidates = {}
-  local bin_dir = build_dir
-  for _, dir in ipairs({ build_dir, build_dir .. '/bin', build_dir .. '/Debug', build_dir .. '/Release' }) do
-    for _, f in ipairs(vim.fn.glob(dir .. '/*', false, true)) do
-      if vim.fn.executable(f) == 1 and not vim.fn.isdirectory(f) then
-        table.insert(candidates, f)
-      end
-    end
-  end
-  local exe
-  if #candidates == 1 then
-    exe = candidates[1]
-  elseif #candidates > 1 then
-    local idx = vim.fn.inputlist(vim.list_extend({ 'Select executable:' }, candidates))
-    if idx > 0 and idx <= #candidates then exe = candidates[idx] end
-  end
-  if not exe or exe == '' then
-    exe = vim.fn.input('Executable: ', build_dir .. '/', 'file')
-  end
-  return exe
-end
-
-vim.keymap.set('n', '<leader>cc', function()
-  cmake_configure()
-end, { desc = 'CMake configure (with compile_commands.json)' })
-
-vim.keymap.set('n', '<leader>cb', function()
-  cmake_build()
-end, { desc = 'CMake build' })
-
-vim.keymap.set('n', '<leader>cr', function()
-  local build_dir = cmake_build()
-  if not build_dir then return end
-  local exe = cmake_find_exe(build_dir)
-  if exe ~= '' and vim.fn.executable(exe) == 1 then
-    vim.cmd('belowright 15split | terminal ' .. vim.fn.shellescape(exe))
-  else
-    vim.notify('No executable selected', vim.log.levels.WARN)
-  end
-end, { desc = 'CMake build & run' })
-
-vim.keymap.set('n', '<leader>cd', function()
-  local build_dir = cmake_build()
-  if not build_dir then return end
-  local exe = cmake_find_exe(build_dir)
-  if exe ~= '' and vim.fn.executable(exe) == 1 then
-    require('dap').run {
-      type = 'lldb',
-      request = 'launch',
-      program = exe,
-      cwd = vim.fn.getcwd(),
-      stopOnEntry = false,
-      args = {},
-      runInTerminal = true,
-    }
-  else
-    vim.notify('No executable selected', vim.log.levels.WARN)
-  end
-end, { desc = 'CMake build & debug' })
-
-vim.api.nvim_create_autocmd('FileType', {
-  pattern = 'qf',
-  callback = function()
-    vim.keymap.set('n', 'dd', function()
-      local idx = vim.fn.line('.')
-      local list = vim.fn.getqflist()
-      if idx > #list then return end
-      table.remove(list, idx)
-      vim.fn.setqflist(list, 'r')
-      vim.api.nvim_buf_setlines(0, idx - 1, idx, false, {})
-    end, { buffer = true, desc = 'Delete entry from quickfix' })
-  end,
-})
+  require('config.tasks').format_project()
+end, { desc = 'Format C/C++ project' })

@@ -1,0 +1,32 @@
+Run `python3 tests/run.py` from this config repository. Requires Neovim and the
+plugins already installed by this config. The integration test starts Neovim
+with the installed user config, creates a temporary Git remote and checkout,
+and stubs GitHub responses. It never posts reviews or fetches a network remote.
+
+Coverage: persistent repository-scoped list and summary caching, expiry, empty
+results, fetched-ref reuse, missing refs, stale advertised SHAs, in-flight sharing, cancellation,
+picker-to-open handoff, explicit refresh, error recovery, actual Diffview opening
+with changed and empty PRs, file navigation after the overview, and overlapping
+open requests. The 1.9-second assertion catches the former fixed two-second wait;
+printed timings use local Git and mocked GitHub, not real-network benchmarks.
+
+LSP coverage also checks package-root callbacks, linked-worktree paths, excluded
+lint servers, duplicate attachment, deferred visible-buffer attachment, and `gd`
+against the real Mason-installed Lua language server. Install that server before
+running the suite. No fixture language server accesses GitHub.
+
+The real Telescope picker is also exercised through immediate description
+preview, early-close cancellation, background Git prefetch, and selection without
+a duplicate fetch. Long-description checks cover wrapping, preview paging,
+start/end controls, and quiet successful navigation. Unit tests verify bounded prefetch concurrency, latest-row
+queue replacement, foreground adoption, and recovery after background errors. A
+late direct-number metadata response cannot replace a newer review selection.
+
+The editor tests additionally cover asynchronous Make jobs and error output,
+executable discovery in paths containing spaces, quickfix/location-list deletion,
+formatter ownership in monorepos, large-file limits, lint debounce/save-only Go
+checks, lazy plugin loading, independent debugger configuration, and LSP highlight
+attachment/detachment. The full-config integration tests perform a real Lua
+language-server definition lookup and a real CMake configure/build in a temporary
+project (requires `make`, `cmake`, and a POSIX shell). Python/Go/LLDB debugger
+configuration is checked, but full debug sessions are not launched by the suite.
