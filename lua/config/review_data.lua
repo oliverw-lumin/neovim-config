@@ -31,6 +31,7 @@ local summary_fields = table.concat({
   'changedFiles',
   'comments',
   'reviews',
+  'commits',
 }, ',')
 local function key_for(root, kind, id)
   return vim.fn.sha256(root .. '\0' .. kind .. '\0' .. tostring(id))
@@ -125,18 +126,45 @@ local function valid_pr(number)
     return type(data) == 'table' and data.number == tonumber(number)
   end
 end
+local function valid_summary(number)
+  return function(data)
+    -- Reject pre-commits cache entries so the timeline refetches.
+    return valid_pr(number)(data) and type(data.commits) == 'table'
+  end
+end
 -- Synchronous local lookup lets the picker paint before any debounce/network work.
 function M.peek_summary(root, number)
   local hit = read(key_for(root, 'summary', number), 300)
-  if hit and valid_pr(number)(hit) then
+  if hit and valid_summary(number)(hit) then
     return vim.deepcopy(hit)
   end
 end
 function M.summary(root, number, callback, force)
-  return request(root, 'summary', number, { 'gh', 'pr', 'view', tostring(number), '--json', summary_fields }, 300, valid_pr(number), callback, force)
+  return request(root, 'summary', number, { 'gh', 'pr', 'view', tostring(number), '--json', summary_fields }, 300, valid_summary(number), callback, force)
 end
 function M.metadata(root, number, callback, force)
   return request(root, 'metadata', number, { 'gh', 'pr', 'view', tostring(number), '--json', M.fields }, 300, valid_pr(number), callback, force)
+end
+function M.commits(root, number, callback, force)
+  return request(root, 'commits', number, { 'gh', 'pr', 'view', tostring(number), '--json', 'commits' }, 300, function(data)
+    return type(data) == 'table' and type(data.commits) == 'table'
+  end, callback, force)
+end
+-- Line comments on the diff. `gh pr view --json comments` is only the
+-- conversation thread; these live on a separate REST list.
+function M.review_comments(root, number, callback, force)
+  return request(
+    root,
+    'review_comments',
+    number,
+    { 'gh', 'api', '--paginate', ('repos/:owner/:repo/pulls/%s/comments'):format(number) },
+    300,
+    function(data)
+      return type(data) == 'table' and vim.islist(data)
+    end,
+    callback,
+    force
+  )
 end
 function M.list(root, search, limit, callback, force)
   return request(

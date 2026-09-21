@@ -11,7 +11,7 @@ end
 local data = require 'config.review_data'
 data.cache_dir = vim.fn.tempname()
 local function finish(job, result)
-  job.callback(result or { code = 0, stdout = '{"number":7,"title":"example"}' })
+  job.callback(result or { code = 0, stdout = '{"number":7,"title":"example","commits":[]}' })
   vim.wait(20, function()
     return false
   end)
