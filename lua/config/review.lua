@@ -1791,6 +1791,25 @@ function M.notes()
   end
 end
 
+-- Searches the picker actually caches. Dropping a PR from these avoids a
+-- full `gh pr list` after we already know it left the queue.
+local function list_searches()
+  local searches = { M.config.search, M.config.all_search }
+  if M.config.hide_approved then
+    searches[#searches + 1] = M.config.search .. ' -review:approved'
+    searches[#searches + 1] = M.config.all_search .. ' -review:approved'
+  end
+  return searches
+end
+
+local function forget_listed(pr)
+  local root = pr and (pr._root or git_root())
+  if not root or not pr.number then
+    return
+  end
+  review_data.remove_from_lists(root, list_searches(), M.config.limit, pr.number)
+end
+
 local EVENTS = {
   approve = { event = 'APPROVE', label = 'APPROVE' },
   comment = { event = 'COMMENT', label = 'COMMENT' },
@@ -1854,6 +1873,9 @@ local function submit_review(pr, kind, opts)
 
   local function finished()
     save_queue(pr.number, {})
+    if ev.event == 'APPROVE' then
+      forget_listed(pr)
+    end
     notify(('#%d submitted (%s, %d line comments)'):format(pr.number, ev.label, #queue))
     if opts.on_done then
       opts.on_done()
@@ -1964,6 +1986,7 @@ function M.close_pr()
         return
       end
       notify(('#%d closed'):format(pr.number))
+      forget_listed(pr)
       tear_down()
     end)
   end

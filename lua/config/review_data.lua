@@ -36,18 +36,25 @@ local summary_fields = table.concat({
 local function key_for(root, kind, id)
   return vim.fn.sha256(root .. '\0' .. kind .. '\0' .. tostring(id))
 end
-local function read(key, ttl)
+local function load_entry(key)
   local entry = cache[key]
-  if not entry then
-    local ok, lines = pcall(vim.fn.readfile, M.cache_dir .. '/' .. key .. '.json')
-    if ok then
-      local decoded, value = pcall(vim.json.decode, table.concat(lines, '\n'))
-      if decoded and type(value) == 'table' then
-        entry = value
-      end
-    end
-    cache[key] = entry
+  if entry ~= nil then
+    return entry or nil
   end
+  local ok, lines = pcall(vim.fn.readfile, M.cache_dir .. '/' .. key .. '.json')
+  if ok then
+    local decoded, value = pcall(vim.json.decode, table.concat(lines, '\n'))
+    if decoded and type(value) == 'table' then
+      entry = value
+    end
+  end
+  -- Remember misses so a missing file is not re-read on every picker open.
+  cache[key] = entry or false
+  return entry
+end
+
+local function read(key, ttl)
+  local entry = load_entry(key)
   if entry and type(entry.time) == 'number' and os.time() >= entry.time and os.time() - entry.time < ttl then
     return entry.data
   end
@@ -199,6 +206,33 @@ function M.list(root, search, limit, callback, force)
     callback,
     force
   )
+end
+
+-- Drop a PR from already-cached `gh pr list` results. The picker keys lists by
+-- search + limit, so pass every search this repo actually uses. No GitHub call.
+function M.remove_from_lists(root, searches, limit, number)
+  number = tonumber(number)
+  if not root or type(searches) ~= 'table' or not number then
+    return
+  end
+  for _, search in ipairs(searches) do
+    local key = key_for(root, 'list', search .. '\0' .. tostring(limit))
+    local entry = load_entry(key)
+    local data = entry and entry.data
+    if type(data) == 'table' and vim.islist(data) then
+      local kept, changed = {}, false
+      for _, pr in ipairs(data) do
+        if tonumber(pr.number) == number then
+          changed = true
+        else
+          kept[#kept + 1] = pr
+        end
+      end
+      if changed then
+        write(key, kept)
+      end
+    end
+  end
 end
 
 -- A cache hit must also match the actual local refs. Deleting/changing refs,
