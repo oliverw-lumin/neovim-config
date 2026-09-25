@@ -9,6 +9,13 @@ if vim.env.SUDO_USER then
   end
 end
 
+-- Prefer rustup-managed toolchains (cargo, rustfmt, rust-analyzer, ...) over
+-- distro-packaged binaries so tools respect the project's rust-toolchain.toml.
+local cargo_bin = os.getenv('HOME') .. '/.cargo/bin'
+if vim.fn.isdirectory(cargo_bin) == 1 then
+  vim.env.PATH = cargo_bin .. ':' .. vim.env.PATH
+end
+
 require 'config.options'
 require 'config.keymaps'
 require 'config.autocmds'

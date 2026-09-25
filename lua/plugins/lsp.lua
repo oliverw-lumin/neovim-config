@@ -47,8 +47,8 @@ return {
           return { timeout_ms = 500, lsp_format = 'fallback' }
         end,
         formatters_by_ft = {
-          c = { 'clang-format' },
-          cpp = { 'clang-format' },
+          c = { lsp = 'clangd' },
+          cpp = { lsp = 'clangd' },
           lua = { 'stylua' },
           python = { 'ruff_fix', 'ruff_format' },
           javascript = js,

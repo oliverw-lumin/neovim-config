@@ -72,7 +72,21 @@ function M.setup()
         [vim.diagnostic.severity.HINT] = '󰌶 ',
       },
     } or {},
-    virtual_text = { source = 'if_many', spacing = 2 },
+    virtual_text = {
+      source = 'if_many',
+      spacing = 2,
+      format = function(diagnostic)
+        local msg = diagnostic.message:gsub('\n', ' ')
+        local win = vim.fn.winwidth(0)
+        local line = vim.fn.virtcol('$') - 1
+        local max = math.min(math.floor(win * 0.7), win - line) - 3
+        if max < 20 then max = 20 end
+        if #msg > max then
+          msg = msg:sub(1, max - 1) .. '…'
+        end
+        return msg
+      end,
+    },
   }
   local projects = require 'config.projects'
   local capabilities = require('blink.cmp').get_lsp_capabilities()
