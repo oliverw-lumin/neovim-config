@@ -14,7 +14,7 @@ def run(args, cwd=config, env=None):
 
 for test in ['projects.lua', 'lint.lua', 'editor_tasks.lua', 'review_data.lua', 'review_lsp.lua', 'review_lsp_navigation.lua']:
     print(run(['nvim', '--headless', '-u', 'NONE', '-i', 'NONE', '-l', 'tests/' + test]).strip())
-for test in ['config_smoke.lua', 'lsp_integration.lua', 'cmake_integration.lua']:
+for test in ['config_smoke.lua', 'lsp_integration.lua', 'cmake_integration.lua', 'sql_integration.lua']:
     command = f'lua local ok,err=pcall(dofile,"tests/{test}"); if not ok then print(err); vim.cmd("cquit 1") end'
     print(run(['nvim', '--headless', '-i', 'NONE', '-c', command]).strip())
 with tempfile.TemporaryDirectory(prefix='nvim-review-test-') as folder:

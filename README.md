@@ -16,6 +16,27 @@ on PATH and in common macOS LLVM locations. Missing LLDB does not prevent Python
 or Go debugging. Python uses the active virtual environment, a project's `.venv`
 or `venv`, then Python on PATH. Flutter's Dart is preferred when available.
 
+## SQL with a local schema
+
+Run `python3 scripts/install-sql-lsp.py` once to install RainLib's `sql-lsp`
+v0.1.3 (release checksum verified) and SQLGlot 28.0.0 in Neovim's data directory.
+Restart Neovim, then open a `.sql` file. The `sql_schema` LSP supplies SQL
+completion through Blink without connecting to a database or executing SQL.
+
+Put `schema.sql` at the nearest Git repository root. Queries in subdirectories
+use that file; nested repositories do not inherit an outer repository's schema.
+Outside Git, the nearest ancestor containing `schema.sql` is used. The file must
+contain `CREATE TABLE` definitions with explicit columns. ClickHouse exports
+with one CREATE per line and no semicolons are supported. Queries default to the
+ClickHouse dialect; explicit server-supported suffixes such as `.postgres.sql`
+select that dialect. This is an offline editing aid, not server-side SQL validation.
+
+Saving `schema.sql` reloads completion metadata. After external edits, run
+`:SqlSchemaReload`. Check attachment with `:checkhealth vim.lsp`; press `Ctrl-Space`
+in Insert mode for completion. Missing schemas leave keyword completion available;
+invalid schemas produce an error and clear stale completion metadata. Schema
+inference and advanced alias resolution are limited by the upstream server.
+
 ## Keys
 
 Leader is **Space**. Which-key shows groups as you type.

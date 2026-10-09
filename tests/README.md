@@ -15,6 +15,11 @@ lint servers, duplicate attachment, deferred visible-buffer attachment, and `gd`
 against the real Mason-installed Lua language server. Install that server before
 running the suite. No fixture language server accesses GitHub.
 
+SQL integration requires `python3 scripts/install-sql-lsp.py` first. It checks the
+real offline SQL server for table/column completion, quoted ClickHouse fields,
+schema reload after save, and isolation between repositories. It does not query
+ClickHouse or execute the schema's SQL.
+
 The real Telescope picker is also exercised through immediate description
 preview, early-close cancellation, background Git prefetch, and selection without
 a duplicate fetch. Long-description checks cover wrapping, preview paging,

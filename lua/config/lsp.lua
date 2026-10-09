@@ -90,6 +90,7 @@ function M.setup()
   }
   local projects = require 'config.projects'
   local capabilities = require('blink.cmp').get_lsp_capabilities()
+  require('config.sql').setup(capabilities)
   local names = {
     'lua_ls',
     'rust_analyzer',
