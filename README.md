@@ -36,6 +36,9 @@ Saving `schema.sql` reloads completion metadata. After external edits, run
 in Insert mode for completion. Missing schemas leave keyword completion available;
 invalid schemas produce an error and clear stale completion metadata. Schema
 inference and advanced alias resolution are limited by the upstream server.
+Generic server syntax diagnostics are suppressed only for the root `schema.sql`:
+its grammar rejects valid ClickHouse DDL. The SQLGlot metadata loader still reports
+schema-load errors; query-file diagnostics remain enabled.
 
 ## Keys
 

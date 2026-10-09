@@ -61,6 +61,17 @@ function M.setup(capabilities)
     get_language_id = function()
       return 'clickhouse'
     end,
+    handlers = {
+      ['textDocument/publishDiagnostics'] = function(err, result, ctx, config)
+        local client = vim.lsp.get_client_by_id(ctx.client_id)
+        -- sql-lsp's generic tree-sitter grammar rejects valid ClickHouse DDL.
+        -- The root schema is validated separately by our SQLGlot catalog loader.
+        if result and client and vim.uri_to_fname(result.uri) == client.config.root_dir .. '/schema.sql' then
+          result = vim.tbl_extend('force', result, { diagnostics = {} })
+        end
+        return vim.lsp.handlers['textDocument/publishDiagnostics'](err, result, ctx, config)
+      end,
+    },
     on_init = function(client)
       -- A metadata completion server must not format files on save.
       client.server_capabilities.documentFormattingProvider = false

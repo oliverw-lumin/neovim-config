@@ -67,6 +67,35 @@ assert(has(columns, 'customer_id') and has(columns, 'amount'), vim.inspect(colum
 assert(has(columns, '`properties.name`'), 'dotted ClickHouse column names must be quoted')
 assert(not client.server_capabilities.documentFormattingProvider, 'do not autoformat SQL with a generic formatter')
 
+-- The upstream grammar rejects ClickHouse DDL. Suppress only the catalog's
+-- diagnostics, not errors in query files.
+local catalog_buf, catalog_client = open(root .. '/schema.sql', ddl)
+assert(catalog_client.id == client.id)
+local published = 0
+local original = client.handlers['textDocument/publishDiagnostics']
+client.handlers['textDocument/publishDiagnostics'] = function(...)
+  published = published + 1
+  return original(...)
+end
+local ddl_before = published
+vim.api.nvim_buf_set_lines(catalog_buf, 0, -1, false, { ddl, '-- diagnostic refresh' })
+vim.bo[catalog_buf].modified = false
+assert(
+  vim.wait(5000, function()
+    return published > ddl_before
+  end, 20),
+  'server must publish schema diagnostics'
+)
+assert(#vim.diagnostic.get(catalog_buf) == 0, 'valid ClickHouse catalog must not show generic grammar errors')
+vim.api.nvim_buf_set_lines(buf, 0, -1, false, { 'SELECT * FROM payments WHERE (' })
+vim.bo[buf].modified = false
+assert(
+  vim.wait(5000, function()
+    return #vim.diagnostic.get(buf) > 0
+  end, 20),
+  'query syntax diagnostics must remain enabled'
+)
+
 local otherbuf, otherclient = open(other .. '/value.sql', 'SELECT * FROM ')
 assert(otherclient.id ~= client.id, 'repositories need separate LSP clients')
 local otheritems = complete(otherbuf, otherclient, 'SELECT * FROM ')
